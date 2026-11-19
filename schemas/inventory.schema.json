@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "daisychain/inventory.schema.json",
+  "title": "Host inventory record",
+  "description": "Output of collect_inventory.py for one host. Null means 'not observed', never 'zero'.",
+  "type": "object",
+  "required": ["schema_version", "collected_at", "hostname", "cluster_node_supported", "os", "cpu",
+               "memory", "numa", "disks", "nics", "nfs_mounts", "time_sync", "software", "warnings"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "collected_at": {"type": "string", "format": "date-time"},
+    "hostname": {"type": "string", "minLength": 1},
+    "fqdn": {"type": "string"},
+    "cluster_node_supported": {"type": "boolean"},
+    "os": {
+      "type": "object",
+      "required": ["system", "kernel"],
+      "properties": {
+        "system": {"type": "string"},
+        "distro": {"type": ["string", "null"]},
+        "distro_version": {"type": ["string", "null"]},
+        "pretty_name": {"type": ["string", "null"]},
+        "kernel": {"type": "string"},
+        "cgroup_version": {"enum": ["v1", "v2", null]}
+      }
+    },
+    "cpu": {
+      "type": "object",
+      "required": ["model", "architecture", "logical_cpus"],
+      "properties": {
+        "model": {"type": ["string", "null"]},
+        "architecture": {"type": "string"},
+        "sockets": {"type": ["integer", "null"]},
+        "cores_per_socket": {"type": ["integer", "null"]},
+        "threads_per_core": {"type": ["integer", "null"]},
+        "physical_cores": {"type": ["integer", "null"]},
+        "logical_cpus": {"type": ["integer", "null"]},
+        "isa_flags": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "memory": {
+      "type": "object",
+      "required": ["total_bytes"],
+      "properties": {
+        "total_bytes": {"type": ["integer", "null"]},
+        "available_bytes": {"type": ["integer", "null"]},
+        "swap_total_bytes": {"type": ["integer", "null"]}
+      }
+    },
+    "numa": {
+      "type": "object",
+      "properties": {"node_count": {"type": ["integer", "null"]}, "nodes": {"type": "array"}}
+    },
+    "disks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "size_bytes", "rotational"],
+        "properties": {
+          "name": {"type": "string"},
+          "size_bytes": {"type": ["integer", "null"]},
+          "rotational": {"type": "boolean"}
+        }
+      }
+    },
+    "nics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "physical", "speed_mbps"],
+        "properties": {
+          "name": {"type": "string"},
+          "physical": {"type": "boolean"},
+          "speed_mbps": {"type": ["integer", "null"]},
+          "mtu": {"type": ["integer", "null"]},
+          "ipv4": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "nfs_mounts": {"type": "array"},
+    "time_sync": {
+      "type": "object",
+      "required": ["ntp_synchronized"],
+      "properties": {"ntp_synchronized": {"type": ["boolean", "null"]},
+                     "service": {"type": ["string", "null"]}}
+    },
+    "software": {"type": "object", "additionalProperties": {"type": ["string", "null"]}},
+    "warnings": {"type": "array", "items": {"type": "string"}}
+  }
+}

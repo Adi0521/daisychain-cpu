@@ -1,0 +1,39 @@
+# Reference topology from PRD §4: eight workers on four switches in a physical chain.
+# Link speeds are the PRD's 1 GbE *planning assumption*, not measured hardware.
+# Replace `source: planning_assumption` with `source: inventory` once M0 inventory exists.
+name: chain-4sw-8w
+kind: chain
+description: Four switches S1→S2→S3→S4, two workers per switch, controller C0 on S1.
+
+link_defaults:
+  gbps: 1.0
+  duplex: full
+  latency_us: null        # unknown until calibrated (PRD §7 step 2)
+  source: planning_assumption
+
+switches:
+  - id: S1
+    switching_capacity_gbps: null   # record from switch datasheet during M0
+  - id: S2
+    switching_capacity_gbps: null
+  - id: S3
+    switching_capacity_gbps: null
+  - id: S4
+    switching_capacity_gbps: null
+
+# Inter-switch links. Must form a tree: no physical loops (PRD §4).
+switch_links:
+  - {a: S1, b: S2}
+  - {a: S2, b: S3}
+  - {a: S3, b: S4}
+
+hosts:
+  - {id: C0, role: controller, switch: S1}
+  - {id: W1, role: worker, switch: S1}
+  - {id: W2, role: worker, switch: S1}
+  - {id: W3, role: worker, switch: S2}
+  - {id: W4, role: worker, switch: S2}
+  - {id: W5, role: worker, switch: S3}
+  - {id: W6, role: worker, switch: S3}
+  - {id: W7, role: worker, switch: S4}
+  - {id: W8, role: worker, switch: S4}

@@ -1,0 +1,28 @@
+# Comparison topology from PRD §4: same hosts, controller, and endpoint link speeds,
+# all attached to one switch. Only the topology differs from chain.yaml.
+name: star-1sw-8w
+kind: star
+description: Single switch S0 with controller C0 and workers W1–W8.
+
+link_defaults:
+  gbps: 1.0
+  duplex: full
+  latency_us: null
+  source: planning_assumption
+
+switches:
+  - id: S0
+    switching_capacity_gbps: null
+
+switch_links: []
+
+hosts:
+  - {id: C0, role: controller, switch: S0}
+  - {id: W1, role: worker, switch: S0}
+  - {id: W2, role: worker, switch: S0}
+  - {id: W3, role: worker, switch: S0}
+  - {id: W4, role: worker, switch: S0}
+  - {id: W5, role: worker, switch: S0}
+  - {id: W6, role: worker, switch: S0}
+  - {id: W7, role: worker, switch: S0}
+  - {id: W8, role: worker, switch: S0}

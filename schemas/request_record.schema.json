@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "daisychain/request_record.schema.json",
+  "title": "Per-request benchmark record",
+  "description": "One line of requests.jsonl per request *attempt*. Durations come from monotonic clocks; wall-clock timestamps are only for correlating logs across hosts (PRD §8). Every request ends with exactly one record where terminal=true.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["run_id", "request_id", "attempt", "terminal", "status", "phase", "worker",
+               "submitted_wall", "queue_ms", "e2e_ms"],
+  "properties": {
+    "run_id": {"type": "string"},
+    "request_id": {"type": "string"},
+    "attempt": {"type": "integer", "minimum": 1, "maximum": 2,
+                "description": "Replicated mode may retry once (PRD §10)."},
+    "terminal": {"type": "boolean"},
+    "status": {"enum": ["ok", "rejected_overload", "timeout", "worker_failed", "error"]},
+    "phase": {"enum": ["warmup", "measured", "cooldown"]},
+    "worker": {"type": ["string", "null"], "description": "Null if rejected before dispatch."},
+    "submitted_wall": {"type": "string", "format": "date-time"},
+    "queue_ms": {"type": ["number", "null"], "minimum": 0},
+    "ttft_ms": {"type": ["number", "null"], "minimum": 0},
+    "prefill_ms": {"type": ["number", "null"], "minimum": 0},
+    "decode_ms": {"type": ["number", "null"], "minimum": 0},
+    "e2e_ms": {"type": ["number", "null"], "minimum": 0},
+    "prompt_tokens": {"type": ["integer", "null"], "minimum": 0},
+    "output_tokens": {"type": ["integer", "null"], "minimum": 0},
+    "mean_itl_ms": {"type": ["number", "null"], "minimum": 0,
+                    "description": "Mean inter-token latency: decode_ms / (output_tokens - 1)."},
+    "error": {"type": ["string", "null"]}
+  }
+}

@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "daisychain/experiment_manifest.schema.json",
+  "title": "Experiment manifest",
+  "description": "Immutable description of one experiment run (PRD F9). Raw logs, metrics exports, per-request records and the summary all carry the same run_id. Written before the run starts and never edited afterwards.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "created_at", "experiment", "evidence_tier", "code",
+               "topology", "nodes", "software", "model", "execution", "workload", "measurement"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "run_id": {
+      "type": "string",
+      "pattern": "^[0-9]{8}T[0-9]{6}Z-[a-z0-9-]+-[0-9a-f]{6}$",
+      "description": "<UTC timestamp>-<experiment>-<6 hex>, e.g. 20261119T101500Z-worker-scaling-a1b2c3"
+    },
+    "created_at": {"type": "string", "format": "date-time"},
+    "experiment": {
+      "enum": ["single-node-baseline", "worker-scaling", "topology", "network-stress",
+               "storage-startup", "compute-stress", "transport", "pipeline", "failure",
+               "calibration", "generator-capacity"],
+      "description": "Experiment families from PRD §8, plus calibration and load-generator capacity checks."
+    },
+    "scaling_mode": {"enum": ["strong", "weak", null]},
+    "evidence_tier": {
+      "enum": ["designed", "simulated", "physically_tested", "completed_8_node"],
+      "description": "PRD §13 status tiers. Simulated runs must never be reported as physically_tested."
+    },
+    "calibrated": {
+      "type": "boolean",
+      "description": "False for simulations not fit to measured hardware; reports label these 'uncalibrated scenario estimates' (PRD §7)."
+    },
+    "purpose": {"enum": ["calibration", "held_out_validation", "evaluation", "exploratory"]},
+    "description": {"type": "string"},
+    "code": {
+      "type": "object",
+      "required": ["git_commit", "dirty"],
+      "properties": {
+        "git_commit": {"type": "string", "pattern": "^[0-9a-f]{7,40}$"},
+        "dirty": {"type": "boolean"},
+        "container_image": {"type": ["string", "null"],
+                            "description": "Image reference pinned by digest (name@sha256:...)."}
+      }
+    },
+    "topology": {
+      "type": "object",
+      "required": ["name", "file", "sha256"],
+      "properties": {
+        "name": {"type": "string"},
+        "file": {"type": "string"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "nodes": {
+      "type": "object",
+      "required": ["controller", "workers"],
+      "properties": {
+        "controller": {"type": "string"},
+        "workers": {"type": "array", "items": {"type": "string"}, "minItems": 1, "uniqueItems": true},
+        "inventory_sha256": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/sha256"},
+          "description": "Hash of each participating host's inventory record."
+        }
+      }
+    },
+    "software": {
+      "type": "object",
+      "description": "Exact versions in effect for this run (from the version matrix and inventory).",
+      "additionalProperties": {"type": "string"}
+    },
+    "model": {
+      "type": "object",
+      "required": ["id", "revision", "precision", "runtime", "runtime_version", "weights_sha256"],
+      "properties": {
+        "id": {"type": "string"},
+        "revision": {"type": "string", "minLength": 7},
+        "precision": {"type": "string", "description": "e.g. fp32, bf16, q8_0, q4_k_m. Must match across compared runs."},
+        "runtime": {"type": "string"},
+        "runtime_version": {"type": "string"},
+        "tokenizer_revision": {"type": "string"},
+        "weights_sha256": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {"$ref": "#/$defs/sha256"}
+        },
+        "staging": {"enum": ["local_ssd", "nfs_direct"]}
+      }
+    },
+    "execution": {
+      "type": "object",
+      "required": ["mode", "transport", "threads_per_worker"],
+      "properties": {
+        "mode": {"enum": ["replicated", "pipeline"]},
+        "transport": {"enum": ["tcp", "mpi", "none"]},
+        "routing_policy": {"enum": ["round_robin", "least_outstanding", null]},
+        "threads_per_worker": {"type": "integer", "minimum": 1},
+        "cpu_affinity": {"type": ["string", "null"]},
+        "batch_size": {"type": "integer", "minimum": 1},
+        "pipeline_stages": {"type": ["integer", "null"], "minimum": 2},
+        "microbatches": {"type": ["integer", "null"], "minimum": 1},
+        "queue_capacity": {"type": "integer", "minimum": 1},
+        "max_in_flight": {"type": "integer", "minimum": 1},
+        "retry_once": {"type": "boolean"},
+        "monitoring_enabled": {"type": "boolean"}
+      }
+    },
+    "workload": {
+      "type": "object",
+      "required": ["input_set", "input_set_sha256", "prompt_tokens", "max_output_tokens", "decoding",
+                   "arrival"],
+      "properties": {
+        "input_set": {"type": "string"},
+        "input_set_sha256": {"$ref": "#/$defs/sha256"},
+        "seed": {"type": "integer"},
+        "prompt_tokens": {"type": "integer", "minimum": 1},
+        "max_output_tokens": {"type": "integer", "minimum": 1},
+        "decoding": {
+          "type": "object",
+          "required": ["strategy"],
+          "properties": {
+            "strategy": {"enum": ["greedy", "sample"]},
+            "temperature": {"type": "number"},
+            "top_p": {"type": "number"},
+            "ignore_eos": {"type": "boolean",
+                           "description": "True forces fixed output length (PRD §5: freeze output lengths)."}
+          }
+        },
+        "arrival": {
+          "type": "object",
+          "required": ["process"],
+          "properties": {
+            "process": {"enum": ["open_poisson", "open_constant", "closed_loop"],
+                        "description": "Latency-under-load tests must use an open-loop process (PRD §8)."},
+            "offered_rps": {"type": ["number", "null"], "minimum": 0},
+            "concurrency": {"type": ["integer", "null"], "minimum": 1}
+          }
+        },
+        "request_deadline_ms": {"type": "number", "exclusiveMinimum": 0}
+      }
+    },
+    "measurement": {
+      "type": "object",
+      "required": ["warmup_s", "window_s", "min_completed_requests", "repetition", "repetitions"],
+      "properties": {
+        "warmup_s": {"type": "number", "minimum": 0},
+        "window_s": {"type": "number", "exclusiveMinimum": 0},
+        "min_completed_requests": {"type": "integer", "minimum": 0},
+        "repetition": {"type": "integer", "minimum": 1},
+        "repetitions": {"type": "integer", "minimum": 1},
+        "start_state": {"enum": ["cold", "warm"]},
+        "p95_latency_limit_ms": {"type": ["number", "null"],
+                                 "description": "Frozen after M1; null before it is chosen."}
+      }
+    },
+    "fault_injection": {
+      "type": ["object", "null"],
+      "properties": {
+        "kind": {"enum": ["kill_worker", "interrupt_link", "remove_nfs"]},
+        "target": {"type": "string"},
+        "at_s": {"type": "number", "minimum": 0}
+      }
+    },
+    "slurm": {
+      "type": ["object", "null"],
+      "properties": {
+        "job_id": {"type": ["string", "null"]},
+        "partition": {"type": "string"},
+        "nodes": {"type": "integer"},
+        "cpus_per_task": {"type": "integer"},
+        "mem_per_node": {"type": "string"},
+        "time_limit": {"type": "string"}
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

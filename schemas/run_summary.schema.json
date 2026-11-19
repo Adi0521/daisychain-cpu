@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "daisychain/run_summary.schema.json",
+  "title": "Benchmark run summary",
+  "description": "Aggregates for one repetition's measured window, derived from requests.jsonl. Failures, timeouts and rejections stay in the success-rate denominator (PRD §8).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "window_s", "offered", "counts", "success_rate",
+               "throughput", "latency_ms", "low_sample"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "run_id": {"type": "string"},
+    "window_s": {"type": "number", "exclusiveMinimum": 0},
+    "offered": {
+      "type": "object",
+      "required": ["requests", "rps"],
+      "properties": {"requests": {"type": "integer", "minimum": 0},
+                     "rps": {"type": "number", "minimum": 0}}
+    },
+    "counts": {
+      "type": "object",
+      "required": ["ok", "rejected_overload", "timeout", "worker_failed", "error", "retried"],
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "success_rate": {"type": "number", "minimum": 0, "maximum": 1},
+    "throughput": {
+      "type": "object",
+      "required": ["achieved_rps", "output_tokens_per_s"],
+      "properties": {"achieved_rps": {"type": "number", "minimum": 0},
+                     "output_tokens_per_s": {"type": "number", "minimum": 0}}
+    },
+    "latency_ms": {
+      "type": "object",
+      "required": ["e2e"],
+      "properties": {
+        "e2e": {"$ref": "#/$defs/dist"},
+        "ttft": {"$ref": "#/$defs/dist"},
+        "itl": {"$ref": "#/$defs/dist"},
+        "queue": {"$ref": "#/$defs/dist"}
+      }
+    },
+    "low_sample": {"type": "boolean",
+                   "description": "True when window < 120 s or < 1,000 completed requests (PRD §8)."},
+    "resources": {
+      "type": "object",
+      "description": "Per-node peaks from Prometheus for the measured window.",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "cpu_util_mean": {"type": "number"},
+          "rss_peak_bytes": {"type": "integer"},
+          "swap_used_peak_bytes": {"type": "integer"},
+          "nic_tx_bytes": {"type": "integer"},
+          "nic_rx_bytes": {"type": "integer"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "dist": {
+      "type": "object",
+      "required": ["n", "p50", "p95", "p99"],
+      "properties": {
+        "n": {"type": "integer", "minimum": 0},
+        "mean": {"type": ["number", "null"]},
+        "p50": {"type": ["number", "null"]},
+        "p95": {"type": ["number", "null"]},
+        "p99": {"type": ["number", "null"]},
+        "max": {"type": ["number", "null"]}
+      }
+    }
+  }
+}

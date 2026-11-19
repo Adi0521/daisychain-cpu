@@ -1,0 +1,82 @@
+# Version matrix (PRD §14 decision 2, M0 exit evidence).
+#
+# Rules:
+#   - `pinned` is set only after the exact version has been installed on the reference
+#     nodes and confirmed by `daisychain inventory check` (which errors on mismatches).
+#   - `candidate` records the current intent; it is NOT verified until `status: pinned`.
+#   - Any change after M1 requires a recorded revision in docs/m0-decisions.md, because
+#     results are only comparable under identical versions.
+#
+# status: open | candidate | pinned
+components:
+  os:
+    candidate: Ubuntu LTS (choose release present on all nodes)
+    pinned: null
+    status: open
+    notes: Record kernel from inventory. cgroup v2 expected; affects Slurm limit enforcement.
+
+  slurm:
+    candidate: Distribution package for the chosen Ubuntu release
+    pinned: null
+    status: open
+    notes: >
+      Same version on controller and every worker. Decide with the container launch
+      approach (decision 4); see https://slurm.schedmd.com/containers.html.
+
+  container_runtime:
+    candidate: Docker Engine (rootless where feasible), alternatives podman / apptainer
+    pinned: null
+    status: open
+    notes: >
+      PRD §6 gate: no unrestricted Docker daemon access just to launch jobs. The runtime
+      must let Slurm track and limit the actual worker processes.
+
+  mpi:
+    candidate: Open MPI (distribution package), TCP BTL for inter-node traffic
+    pinned: null
+    status: open
+    notes: >
+      Same build inside the image and on the host. Record the transport MPI actually
+      selects (e.g. --mca btl_base_verbose) and confirm the inter-node path is TCP.
+
+  pmix:
+    candidate: Version matching the Slurm and Open MPI builds
+    pinned: null
+    status: open
+
+  nfs:
+    candidate: Kernel NFS server + nfs-common, NFSv4.2
+    pinned: null
+    status: open
+
+  simgrid:
+    candidate: Latest stable SimGrid release at M0 (S4U + SMPI)
+    pinned: null
+    status: open
+    notes: Pin the exact release; platform file syntax changes between major versions.
+
+  prometheus:
+    candidate: Prometheus + node_exporter
+    pinned: null
+    status: open
+
+  grafana:
+    candidate: Grafana OSS
+    pinned: null
+    status: open
+
+  python:
+    candidate: Distribution python3 on hosts; image Python pinned in Dockerfile
+    pinned: null
+    status: open
+
+  inference_runtime:
+    candidate: null   # chosen in M1 after memory/runtime measurements (PRD §5)
+    pinned: null
+    status: open
+    notes: Must support fixed precision/quantization and expose prefill/decode timing.
+
+  model:
+    candidate: null   # small causal LM that fits comfortably on one worker
+    pinned: null      # record as <repo>@<commit sha> plus per-file sha256
+    status: open
