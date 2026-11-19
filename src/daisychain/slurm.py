@@ -116,9 +116,23 @@ def start(plan: emu.Plan, cores: int, memory_mb: int, log=print, timeout_s: int 
         states = node_states(plan)
         if states and all(s == "idle" for s in states.values()):
             log(f"slurm: {len(states)} node(s) idle in partition {PARTITION}")
+            wait_nfs_ready(plan, log=log)
             return
         time.sleep(2)
     raise emu.EmuError(f"slurm nodes not idle after {timeout_s}s: {states}")
+
+
+def wait_nfs_ready(plan: emu.Plan, timeout_s: int = 120, log=print) -> None:
+    """Block until a worker can open a file on NFS, i.e. the server's grace period is over."""
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout_s:
+        r = emu.exec_(plan.hosts[1], "timeout", "10", "cat", "/shared/.ready", check=False)
+        if r.returncode == 0:
+            log(f"nfs: /shared readable on {plan.hosts[1]} after {time.monotonic() - t0:.0f}s "
+                "(NFSv4 grace period over)")
+            return
+        time.sleep(2)
+    raise emu.EmuError(f"NFS not readable after {timeout_s}s")
 
 
 def node_states(plan: emu.Plan) -> dict[str, str]:

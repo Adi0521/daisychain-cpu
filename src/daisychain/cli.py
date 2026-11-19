@@ -231,6 +231,71 @@ def cmd_emu_container_verify(args) -> int:
     return 0 if ok else 1
 
 
+def cmd_emu_nfs_verify(args) -> int:
+    from dataclasses import asdict
+
+    from . import storage
+
+    plan = emu.plan_from_running()
+    print(f"NFS and staging checks on {plan.topo.name}, {len(plan.hosts) - 1} worker(s) — emulation")
+    checks = storage.verify(plan, size_mb=args.size_mb)
+    ok = all(c.ok for c in checks)
+    if args.output:
+        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.output).write_text(json.dumps(
+            {"topology": plan.topo.name, "workers": len(plan.hosts) - 1, "ok": ok,
+             "checks": [asdict(c) for c in checks]}, indent=2) + "\n")
+        print(f"wrote {args.output}")
+    print("PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def cmd_emu_publish_synthetic(args) -> int:
+    from . import storage
+
+    plan = emu.plan_from_running()
+    aid = storage.publish_synthetic(plan, args.name, args.size_mb, args.files, args.replace)
+    print(f"published models/{args.name}: {args.size_mb} MiB in {args.files} file(s), "
+          f"artifact {aid}")
+    return 0
+
+
+def cmd_emu_staging_bench(args) -> int:
+    from dataclasses import asdict
+
+    from . import storage
+
+    plan = emu.plan_from_running()
+    n_workers = len(plan.hosts) - 1
+    counts = [int(c) for c in args.counts.split(",") if int(c) <= n_workers]
+    caches = args.cache.split(",")
+    run_id = f"{dt.datetime.now(dt.timezone.utc):%Y%m%dT%H%M%SZ}-storage-startup-{secrets.token_hex(3)}"
+    print(f"{run_id}: staging {args.artifact} on {plan.topo.name}, N={counts}, "
+          f"cache={caches}, {args.repeats} repeat(s) — emulation, evidence tier 'designed'")
+    runs = storage.bench(plan, args.artifact, counts, args.repeats, caches)
+    rows = storage.summarize(runs)
+    print()
+    isl_keys = list(rows[0]["isl_mb_measured"]) if rows else []
+    fwd = [k for k in isl_keys if k in ("S1->S2", "S2->S3", "S3->S4")]
+    print(_table(
+        ["cache", "N", "workers", "makespan s", "min possible s", "efficiency", "aggregate Mb/s",
+         "valid"]
+        + [f"{k} MB meas/exp" for k in fwd],
+        [[r["cache"], r["n"], ",".join(r["nodes"]),
+          f"{r['makespan_mean_s']:.2f} ± {r['makespan_sd_s']:.2f}", f"{r['predicted_min_s']:.2f}",
+          f"{r['efficiency']:.0%}", f"{r['aggregate_mbps']:.0f}", "yes" if r["valid"] else "NO"]
+         + [f"{r['isl_mb_measured'][k]:.0f}/{r['isl_mb_expected'][k]:.0f}" for k in fwd]
+         for r in rows]))
+    if args.output:
+        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.output).write_text(json.dumps(
+            {"run_id": run_id, "experiment": "storage-startup", "evidence_tier": "designed",
+             "topology": plan.topo.name, "gbps": plan.gbps, "artifact": args.artifact,
+             "summary": rows, "runs": [asdict(r) for r in runs]}, indent=2) + "\n")
+        print(f"\nwrote {args.output}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="daisychain", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -296,6 +361,24 @@ def build_parser() -> argparse.ArgumentParser:
                       help="Slurm/container gate: identity, limits, exit codes, cleanup")
     c.add_argument("--output", help="write JSON report here")
     c.set_defaults(func=cmd_emu_container_verify)
+
+    c = em.add_parser("nfs-verify", help="NFS mounts, permissions, verified staging, results")
+    c.add_argument("--size-mb", type=int, default=64)
+    c.add_argument("--output", help="write JSON report here")
+    c.set_defaults(func=cmd_emu_nfs_verify)
+    c = em.add_parser("publish-synthetic", help="publish random 'weights' to models/<name>")
+    c.add_argument("name")
+    c.add_argument("--size-mb", type=int, default=256)
+    c.add_argument("--files", type=int, default=4)
+    c.add_argument("--replace", action="store_true")
+    c.set_defaults(func=cmd_emu_publish_synthetic)
+    c = em.add_parser("staging-bench", help="cold-start staging time vs simultaneous workers")
+    c.add_argument("--artifact", default="models/synthetic-256m")
+    c.add_argument("--counts", default="1,2,4,8")
+    c.add_argument("--repeats", type=int, default=3)
+    c.add_argument("--cache", default="cold", help="comma list of cold,warm-server")
+    c.add_argument("--output", help="write JSON report here")
+    c.set_defaults(func=cmd_emu_staging_bench)
 
     c = sub.add_parser("validate", help="validate JSON/JSONL files against a schema")
     c.add_argument("schema", choices=schemas.SCHEMA_NAMES)

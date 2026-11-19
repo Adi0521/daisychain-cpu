@@ -107,10 +107,17 @@ comparison (PRD §4). Measure controller saturation before blaming workers or sw
 
 These numbers are static flow counts, not simulation results or measurements.
 
+**Emulation check (2026-11-19):** staging a 256 MiB artifact over NFS to 1/2/4/8 workers
+at once took 2.5/4.7/9.2/18.4 s on the chain and 2.8/4.8/9.4/18.3 s on the star, at 86–94%
+of the C0-link bound in both. The fan-out conclusion above holds in emulation (see
+[emulated-cluster.md](emulated-cluster.md#storage-startup-experiment-prd-8)). Hardware
+measurements are still needed, including the server's disk, which the emulator hides.
+
 ## Revision log
 
 | Date | Change | Reason |
 |---|---|---|
+| 2026-11-19 | NFSv4 storage + verified local staging on the emulated cluster. Cold start of 256 MiB to N workers: 2.5/4.7/9.2/18.4 s for N=1/2/4/8 (chain) and the same within noise on the star, so C0's NIC limits cold start, not the chain. NFS grace period (default 90 s) blocks opens after a server restart; emulator uses 15 s | Decision 5 evidence (emulation) |
 | 2026-11-19 | Proposed container launch: Docker-built images run with non-setuid Apptainer 1.5.5 under `srun`; all container gate checks pass in emulation | Decision 4 |
 | 2026-11-19 | Slurm 23.11.4 on the emulated cluster: 1/2/4/8-node allocation, cgroup v2 CPU/RAM limits, exit codes, cancellation and timeout cleanup all pass; Slurm time-limit enforcement takes ~1–2 min, so the 30 s failure bound must come from the router | Decision 4 groundwork |
 | 2026-11-19 | Emulated cluster added (docs/emulated-cluster.md); chain vs star cross-traffic in emulation: 932 vs 3679 Mb/s, matching the static prediction | No hardware yet |

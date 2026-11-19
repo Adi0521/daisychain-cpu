@@ -1,0 +1,5 @@
+# Node image build context is the repo root; send only what the Dockerfile copies.
+*
+!emu/node-init.sh
+!emu/slurm-epilog.sh
+!src/daisychain/stage.py

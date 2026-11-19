@@ -138,11 +138,11 @@ uv run daisychain emu stage-image --image <docker image> --name <name>   # any i
 docker exec -u dcuser dc-C0 srun -N2 apptainer exec /var/lib/daisychain/images/probe python3 --version
 ```
 
-- **Images:** built with Docker. `stage-image` saves the image, converts it to an Apptainer
-  sandbox on C0, and copies it to `/var/lib/daisychain/images/<name>` on every worker. The
-  Docker image ID is recorded in each copy and checked for consistency. For now the copy
-  goes through the Docker host, not the emulated fabric; NFS staging will move it onto the
-  fabric so the transfer can be measured.
+- **Images:** built with Docker. `stage-image` converts the image to an Apptainer sandbox
+  once on C0 and publishes it to NFS as `images/<name>/image.tar` with a checksum manifest.
+  Every worker then stages it over the emulated fabric with `daisychain-stage --untar`
+  (see [Shared storage](#shared-storage-nfs)). The artifact ID is recorded in each staged
+  copy and checked for consistency.
 - **Probe image:** `emu/probe` (Python 3.12 on Debian 12). The nodes run Ubuntu 24.04, so
   checks can tell they really are inside the image.
 - **Runtime:** non-setuid Apptainer 1.5.5. A running containerised step on a worker looks
@@ -156,7 +156,7 @@ docker exec -u dcuser dc-C0 srun -N2 apptainer exec /var/lib/daisychain/images/p
 
 | Check | Result (8 workers) |
 |---|---|
-| `container_staged` | same image ID on all 8 workers |
+| `container_staged` | same artifact ID on all 8 workers, delivered over NFS |
 | `container_identity` | on every worker the task runs as UID 2000, sees Debian 12, and sits in its Slurm step's cgroup |
 | `container_limits_on_process` | `memory.max` = 200 MiB and 1 CPU within the worker's share, inside the container, on W1 and W8 |
 | `container_memory_enforced` | 300 MiB allocation under `--mem=100M` is OOM-killed |
@@ -167,6 +167,114 @@ docker exec -u dcuser dc-C0 srun -N2 apptainer exec /var/lib/daisychain/images/p
 (`exec /usr/bin/true failed: invalid argument` once squashfuse mounts the image; running
 the same image unpacked works). So images are staged as sandbox directories. Re-test SIF
 on real hardware before choosing the image format there.
+
+## Shared storage (NFS)
+
+C0 runs the kernel NFSv4 server (NFSv4.2 only, no rpcbind) and exports `/export`, a Docker
+volume: the container's overlay root filesystem can't be exported. Workers mount it at
+`/shared` over the emulated fabric. Kernel nfsd runs per network namespace, so it serves
+only C0's emulated interface.
+
+```
+/shared/models/<name>/    published artifacts: MANIFEST.sha256 + files (root-owned, read-only)
+/shared/images/<name>/    image.tar (Apptainer sandbox) + manifest; SOURCE.json = Docker provenance
+/shared/datasets/
+/shared/results/          writable by dcuser; jobs write <tmp> then rename
+```
+
+```sh
+uv run daisychain emu nfs-verify --output results/emu/nfs-verify.json
+uv run daisychain emu publish-synthetic synthetic-256m --size-mb 256
+uv run daisychain emu staging-bench --artifact models/synthetic-256m --counts 1,2,4,8 \
+    --repeats 3 --cache cold,warm-server --output results/emu/staging-bench.json
+docker exec -u dcuser dc-C0 srun -N4 daisychain-stage models/synthetic-256m
+```
+
+**Publishing** (`storage.publish_*`, on C0 as root): files are written to a temporary
+directory, `MANIFEST.sha256` is computed, and the directory is renamed into place.
+Republishing an existing name fails unless replacement is explicitly requested. Jobs can't
+write under `models/` or `images/`, and root on a worker can't either (`root_squash`), so
+shared model files are never written concurrently (F7).
+
+**Staging** (`daisychain-stage`, `src/daisychain/stage.py`, standard library only, run as
+one Slurm task per node): it reads the manifest (the artifact ID is its SHA-256), skips
+the copy if the local copy carries the same ID, and takes a per-node lock. It then
+streams every file to a private temporary directory, hashing while copying, and either
+renames the result into place or fails without leaving anything behind. It prints one JSON
+line with bytes, seconds and Mb/s.
+
+**Mount options:** `vers=4.2,soft,timeo=50,retrans=2,noatime`. `soft` turns a lost server
+into an error within about 15 s instead of an unkillable hang (PRD §10: "NFS failure must
+produce a bounded error"). That is safe because staging verifies checksums and results
+are renamed into place.
+
+### Acceptance checks (`emu nfs-verify`)
+
+| Check | Result (8 workers, chain) |
+|---|---|
+| `nfs_mounted` | every worker mounts `C0:/` (nfs4, soft) from 10.10.0.10 over the fabric |
+| `nfs_permissions` | artifacts are read-only to jobs and to worker root; `results/` is writable by dcuser |
+| `stage_verified` | 64 MiB artifact staged on all 8 workers with checksums verified and the same artifact ID; every worker's switch port carried ≥ the artifact size |
+| `stage_cache_hit` | a second staging reads no data on any worker |
+| `stage_same_node_lock` | two tasks on one node: one copies, the other waits for the lock and reuses the copy |
+| `stage_rejects_corruption` | one flipped byte on the server → `checksum_mismatch`, nothing left locally |
+| `results_publication` | every worker writes `results/<run>/<host>.json` via temp file + rename |
+
+### Storage-startup experiment (PRD §8)
+
+256 MiB synthetic artifact (4 shards), staged simultaneously to the first N workers, 3
+repeats each, VM page cache dropped before every repeat. "Min possible" is the max-min
+fair-share bound from the topology: every flow shares C0's 1 Gb/s link.
+
+| Topology | Cache | N | Makespan (s) | Min possible (s) | Efficiency | Aggregate Mb/s |
+|---|---|---|---|---|---|---|
+| chain | cold | 1 | 2.49 ± 0.09 | 2.15 | 86% | 863 |
+| chain | cold | 2 | 4.66 ± 0.07 | 4.29 | 92% | 922 |
+| chain | cold | 4 | 9.16 ± 0.14 | 8.59 | 94% | 938 |
+| chain | cold | 8 | 18.40 ± 0.18 | 17.18 | 93% | 934 |
+| chain | warm server | 8 | 18.44 ± 0.25 | 17.18 | 93% | 932 |
+| star | cold | 1 | 2.80 ± 0.30 | 2.15 | 77% | 773 |
+| star | cold | 2 | 4.83 ± 0.23 | 4.29 | 89% | 892 |
+| star | cold | 4 | 9.40 ± 0.49 | 8.59 | 91% | 916 |
+| star | cold | 8 | 18.29 ± 0.24 | 17.18 | 94% | 939 |
+
+Bytes on the chain's inter-switch links for N=8 were 1685/1123/562 MB measured against
+1611/1074/537 MB expected for S1→S2/S2→S3/S3→S4: the expected 6, 4 and 2 copies, plus about
+4.6% NFS/TCP/IP overhead.
+
+What it shows (emulation, evidence tier "designed"):
+
+- **Cold start grows linearly with N, and C0's link is the bottleneck.** Every simultaneous
+  start adds about 2.3 s per 256 MiB. Eight workers loading a real model of size M from NFS
+  would take roughly 8·M / 117 MB/s.
+- **The chain doesn't change cold-start time.** The star is within noise at every N, as
+  the static analysis predicted. Topology starts to matter only for worker↔worker traffic.
+- **Server disk cache doesn't matter here:** cold ≈ warm server, because the network
+  bottleneck hides the VM disk. On hardware the server's SSD may matter; measure it there.
+- **Mitigations to test** (PRD §12, "stage locally, stagger startup"): the staged local
+  copy already makes the warm path free (`stage_cache_hit`). A faster C0 uplink would raise
+  the ceiling but is a hardware change, so it must stay out of the chain-vs-star
+  comparison.
+
+### Pitfalls found (and how the code handles them)
+
+1. **NFSv4 grace period.** After any server start or restart, NFSv4 blocks opens for its
+   grace period, 90 s by default. The first star benchmark repeat took 91 s because of it.
+   The emulator sets lease and grace times to 15 s (`NFS_LEASE_S`, `NFS_GRACE_S` in
+   `node-init.sh`), and `emu up` waits until a worker can read `/shared`. **For the PRD's NFS
+   failure experiments this is the recovery time to expect after a server restart**;
+   choose and record the value for hardware.
+2. **Client page cache hides the network.** Deleting the local staged copy is not enough
+   for a cold run: the worker's NFS *client* cache still holds the file, and the first
+   "warm server" runs moved almost nothing over the fabric (0.47 s instead of 2.5 s).
+   The benchmark now drops caches before every repeat and marks a run invalid unless every
+   worker's switch port carried at least the artifact size.
+3. **Hard mounts can wedge the host.** With a default `hard` mount, removing the server
+   container before a client left the client's exiting task stuck in
+   `nfs4_proc_delegreturn` forever. Its namespaces were already gone, so neither `umount -f`
+   nor the 6.6+ `/sys/fs/nfs/*/shutdown` switch could reach it, and only restarting Docker
+   Desktop cleared it. Fixes: `soft` mounts, and `emu down` unmounts the clients and
+   removes workers before C0.
 
 ## Known limitations
 
@@ -189,8 +297,8 @@ on real hardware before choosing the image format there.
 
 ## Next increments
 
-1. NFS: export from C0 (kernel nfsd may not be available in the Docker Desktop VM, in which
-   case use NFS-Ganesha in userspace), plus checksum-verified staging to worker local disk (F7).
-2. MPI: Open MPI with the TCP BTL, ping-pong/bandwidth/collective benchmarks (F6).
-3. Monitoring: node_exporter, Prometheus and Grafana on C0, plus a management interface for
+1. MPI: Open MPI with the TCP BTL, ping-pong/bandwidth/collective benchmarks (F6).
+2. Monitoring: node_exporter, Prometheus and Grafana on C0, plus a management interface for
    browser access (F8).
+3. Failure experiments (PRD §8, §10): kill a worker, interrupt a link (take a veth down),
+   remove NFS access; measure detection time and request outcomes.

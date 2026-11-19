@@ -26,6 +26,7 @@ from .topology import Topology
 IMAGE = "daisychain/node:dev"
 LABEL = "daisychain.emu"
 PREFIX = "dc-"
+SHARED_VOLUME = "dc-shared"  # C0's NFS export; an ext4-backed volume (overlayfs can't be exported)
 DATA_SUBNET = ipaddress.ip_network("10.10.0.0/24")
 FIRST_HOST_OFFSET = 10
 TBF_QUEUE_LATENCY_MS = 50
@@ -162,7 +163,7 @@ def _docker(*args: str, input: str | None = None, check: bool = True,
 
 
 def build_image(quiet: bool = False) -> None:
-    args = ["build", "-t", IMAGE, "-f", str(REPO_ROOT / "emu/node.Dockerfile"), str(REPO_ROOT / "emu")]
+    args = ["build", "-t", IMAGE, "-f", str(REPO_ROOT / "emu/node.Dockerfile"), str(REPO_ROOT)]
     if quiet:
         args.insert(1, "-q")
     _docker(*args, capture=False)
@@ -224,6 +225,8 @@ def up(plan: Plan, build: bool = False, worker_cores: int = 2, worker_memory_mb:
         label_args += ["--label", f"{k}={v}"]
 
     try:
+        _docker("volume", "rm", "-f", SHARED_VOLUME, check=False)
+        _docker("volume", "create", "--label", f"{LABEL}={plan.topo.name}", SHARED_VOLUME)
         for node in plan.nodes:
             role = ("switch" if node in plan.switches
                     else plan.topo.hosts[node].role)
@@ -238,6 +241,10 @@ def up(plan: Plan, build: bool = False, worker_cores: int = 2, worker_memory_mb:
                          "--cpus", str(worker_cores),
                          "--memory", f"{worker_memory_mb}m", "--memory-swap",
                          f"{worker_memory_mb}m"]
+            if role == "controller":
+                # Kernel nfsd needs privileges; it serves only C0's (emulated) interface
+                # because nfsd is per network namespace.
+                args += ["--privileged", "--mount", f"type=volume,src={SHARED_VOLUME},dst=/export"]
             _docker(*args, IMAGE)
         log(f"started {len(plan.nodes)} containers")
 
@@ -263,9 +270,24 @@ def up(plan: Plan, build: bool = False, worker_cores: int = 2, worker_memory_mb:
 
 
 def down(log=print) -> int:
+    """Remove the cluster. NFS clients are unmounted first and workers removed before C0:
+    removing the server while a client still has the mount can leave the client container
+    unkillable (its exiting tasks wait on NFS forever)."""
     nodes = running_nodes()
-    if nodes:
-        _docker("rm", "-f", *[n["container"] for n in nodes.values()])
+    workers = [n for n, v in nodes.items() if v["labels"].get("daisychain.role") == "worker"]
+    for w in workers:
+        if nodes[w]["state"] == "running":
+            try:
+                subprocess.run(["docker", "exec", container(w), "umount", "-f", "-l", "/shared"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+            except subprocess.TimeoutExpired:
+                log(f"warning: unmounting /shared on {w} timed out")
+    if workers:
+        _docker("rm", "-f", *[container(w) for w in workers])
+    rest = [v["container"] for n, v in nodes.items() if n not in workers]
+    if rest:
+        _docker("rm", "-f", *rest)
+    _docker("volume", "rm", "-f", SHARED_VOLUME, check=False)
     log(f"removed {len(nodes)} containers")
     return len(nodes)
 

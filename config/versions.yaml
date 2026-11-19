@@ -54,9 +54,13 @@ components:
     status: open
 
   nfs:
-    candidate: Kernel NFS server + nfs-common, NFSv4.2
+    candidate: Kernel NFS server + nfs-common (Ubuntu 24.04), NFSv4.2 only
     pinned: null
-    status: open
+    status: candidate
+    notes: >
+      Client options vers=4.2,soft,timeo=50,retrans=2,noatime (bounded errors). Server
+      lease/grace set to 15 s in emulation (kernel default 90 s); choose for hardware,
+      since it sets the recovery time after a server restart.
 
   simgrid:
     candidate: Latest stable SimGrid release at M0 (S4U + SMPI)
