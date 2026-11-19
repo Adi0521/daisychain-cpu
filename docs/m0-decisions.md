@@ -86,4 +86,5 @@ These numbers are static flow counts, not simulation results or measurements.
 
 | Date | Change | Reason |
 |---|---|---|
+| 2026-11-19 | Emulated cluster added (docs/emulated-cluster.md); chain vs star cross-traffic in emulation: 932 vs 3679 Mb/s, matching the static prediction | No hardware yet |
 | 2026-11-19 | Initial M0 scaffolding: topology files, inventory tooling, version matrix template, benchmark schemas v1 | Start of M0 |

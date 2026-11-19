@@ -35,6 +35,7 @@ class Topology:
     switch_links: list[tuple[str, str]]
     link_gbps: float
     link_source: str
+    link_latency_us: float | None = None
     switch_capacity_gbps: dict[str, float | None] = field(default_factory=dict)
 
     # ---- construction -------------------------------------------------------------
@@ -58,6 +59,7 @@ class Topology:
                 switch_links=[(l["a"], l["b"]) for l in data.get("switch_links") or []],
                 link_gbps=float(defaults.get("gbps", 1.0)),
                 link_source=defaults.get("source", "unspecified"),
+                link_latency_us=defaults.get("latency_us"),
                 switch_capacity_gbps={
                     s["id"]: s.get("switching_capacity_gbps") for s in switches_raw
                 },

@@ -7,4 +7,4 @@ build/
 *.egg-info/
 # local dev-machine inventories are not cluster evidence
 inventory/hosts/*.dev.json
-Distributed_CPU_Inference_Cluster_PRD.md
+results/

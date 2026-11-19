@@ -9,7 +9,7 @@ import secrets
 import sys
 from pathlib import Path
 
-from . import collect_inventory, inventory, schemas
+from . import collect_inventory, emu, inventory, schemas
 from .topology import PATTERNS, Topology, TopologyError, describe_link
 
 
@@ -131,6 +131,51 @@ def cmd_run_id(args) -> int:
     return 0
 
 
+# ---- emulated cluster ---------------------------------------------------------------------
+
+
+def cmd_emu_up(args) -> int:
+    topo = Topology.load(args.topology)
+    plan = emu.make_plan(topo, args.workers, args.gbps, args.latency_us, args.topology)
+    emu.up(plan, build=args.build, worker_cpus=args.worker_cpus, worker_memory=args.worker_memory)
+    print(_table(["node", "address", "switch"],
+                 [[h, plan.addresses[h], topo.hosts[h].switch] for h in plan.hosts]))
+    print(f"\nshell: docker exec -it {emu.container(plan.hosts[0])} bash")
+    return 0
+
+
+def cmd_emu_down(args) -> int:
+    emu.down()
+    return 0
+
+
+def cmd_emu_status(args) -> int:
+    nodes = emu.running_nodes()
+    if not nodes:
+        print("no emulated cluster")
+        return 1
+    labels = next(iter(nodes.values()))["labels"]
+    print(f"topology {labels.get(emu.LABEL)}, {labels.get('daisychain.workers')} worker(s), "
+          f"{labels.get('daisychain.gbps')} Gb/s links")
+    print(_table(["node", "role", "container", "state"],
+                 [[n, v["labels"].get("daisychain.role", "?"), v["container"], v["state"]]
+                  for n, v in sorted(nodes.items())]))
+    return 0 if all(v["state"] == "running" for v in nodes.values()) else 1
+
+
+def cmd_emu_verify(args) -> int:
+    plan = emu.plan_from_running()
+    print(f"verifying {plan.topo.name} with {len(plan.hosts) - 1} worker(s) — "
+          "emulation, not hardware evidence")
+    report = emu.verify(plan, seconds=args.seconds, tolerance=args.tolerance)
+    if args.output:
+        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.output).write_text(json.dumps(report, indent=2) + "\n")
+        print(f"wrote {args.output}")
+    print("PASS" if report["ok"] else "FAIL")
+    return 0 if report["ok"] else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="daisychain", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -160,6 +205,28 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--payload-mb", type=float, help="per-flow payload for a transfer-time bound")
     c.set_defaults(func=cmd_topology_load)
 
+    em = sub.add_parser("emu", help="emulated cluster in Docker").add_subparsers(
+        dest="sub", required=True)
+    c = em.add_parser("up", help="start containers and wire the topology")
+    c.add_argument("--topology", default="config/topology/chain.yaml")
+    c.add_argument("--workers", type=int, help="use only the first N workers")
+    c.add_argument("--gbps", type=float, help="override link speed per direction")
+    c.add_argument("--latency-us", type=float, help="add one-way delay per link endpoint")
+    c.add_argument("--worker-cpus", type=float)
+    c.add_argument("--worker-memory")
+    c.add_argument("--build", action="store_true", help="rebuild the node image")
+    c.set_defaults(func=cmd_emu_up)
+    c = em.add_parser("down", help="remove all emulated containers")
+    c.set_defaults(func=cmd_emu_down)
+    c = em.add_parser("status")
+    c.set_defaults(func=cmd_emu_status)
+    c = em.add_parser("verify", help="check reachability, paths and link sharing")
+    c.add_argument("--seconds", type=int, default=5)
+    c.add_argument("--tolerance", type=float, default=0.15,
+                   help="allowed shortfall of measured vs predicted aggregate")
+    c.add_argument("--output", help="write JSON report here")
+    c.set_defaults(func=cmd_emu_verify)
+
     c = sub.add_parser("validate", help="validate JSON/JSONL files against a schema")
     c.add_argument("schema", choices=schemas.SCHEMA_NAMES)
     c.add_argument("files", nargs="+")
@@ -175,7 +242,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
-    except TopologyError as e:
+    except (TopologyError, emu.EmuError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
 

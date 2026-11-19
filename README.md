@@ -4,8 +4,10 @@ Distributed CPU inference cluster: a study of how a chain of Ethernet switches a
 inference throughput, latency, startup and fault behavior as the cluster grows from 1 to
 8 workers. See [the PRD](Distributed_CPU_Inference_Cluster_PRD.md).
 
-**Current stage: M0 (inventory and choices).** Status and open decisions are tracked in
-[docs/m0-decisions.md](docs/m0-decisions.md). Nothing here is a hardware measurement yet.
+**Current stage: M0 (inventory and choices), with no hardware yet.** Status and open
+decisions are tracked in [docs/m0-decisions.md](docs/m0-decisions.md). Until hardware
+arrives, an [emulated cluster](docs/emulated-cluster.md) of Docker containers wired as the
+chain or star topology stands in for it. Nothing here is a hardware measurement yet.
 
 ## Layout
 
@@ -16,6 +18,7 @@ inference throughput, latency, startup and fault behavior as the cluster grows f
 | `schemas/` | JSON schemas: host inventory, experiment manifest, per-request records, run summary |
 | `examples/` | Illustrative (not real) manifest, request records and summary |
 | `inventory/hosts/` | One inventory JSON per cluster node (`*.dev.json` is git-ignored) |
+| `emu/` | Node image for the emulated cluster |
 | `src/daisychain/` | CLI and library |
 
 ## Setup
@@ -39,6 +42,9 @@ uv run daisychain topology validate config/topology/*.yaml
 uv run daisychain topology routes config/topology/chain.yaml
 uv run daisychain topology load config/topology/chain.yaml --pattern all-to-all
 uv run daisychain topology load config/topology/star.yaml --pattern fanout --payload-mb 1500
+
+# Emulated cluster (Docker): see docs/emulated-cluster.md
+uv run daisychain emu up && uv run daisychain emu verify && uv run daisychain emu down
 
 # Benchmark records
 uv run daisychain run-id worker-scaling
