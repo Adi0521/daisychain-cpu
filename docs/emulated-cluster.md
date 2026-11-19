@@ -122,10 +122,8 @@ stores limits in whole minutes and checks them about every 30 s.
 **Implication for F10/§9:** don't rely on Slurm time limits to detect failures within
 30 s. The router's own deadlines and health checks must enforce that bound.
 
-Not covered yet: MPI launch through
-Slurm (PMIx fails to load: `mpi/pmix_v5: can not load PMIx library`, harmless while
-`MpiDefault=none`), and `sacct` accounting (needs `slurmdbd` plus a database; job records
-currently go to `jobcomp.log`).
+Not covered yet: `sacct` accounting (needs `slurmdbd` plus a database; job records
+currently go to `jobcomp.log`). MPI launch is covered in [MPI](#mpi) below.
 
 ## Containerised job steps
 
@@ -276,6 +274,62 @@ What it shows (emulation, evidence tier "designed"):
    Desktop cleared it. Fixes: `soft` mounts, and `emu down` unmounts the clients and
    removes workers before C0.
 
+## MPI
+
+Covers PRD F6 and the MPI part of the §6 Slurm/container gate.
+
+```sh
+uv run daisychain emu mpi-verify                 # builds and stages the MPI image if needed
+uv run daisychain emu mpi-bench --output results/emu/mpi-bench-chain.json
+```
+
+**Launch:** `srun --mpi=pmix … apptainer exec /var/lib/daisychain/images/mpi dcbench …`
+
+- **One build inside and outside the container.** `emu/mpi/dcbench.c` is compiled with
+  the same flags against Ubuntu 24.04's Open MPI 4.1.6 in both the node image (for native
+  diagnostic runs) and the MPI job image `emu/mpi/Dockerfile`. The job image reaches
+  workers through NFS staging like any other image.
+- **PMIx:** Slurm 23.11's `mpi/pmix_v5` plugin and Open MPI share the distribution's
+  PMIx 5.0.1. The plugin `dlopen`s the unversioned `libpmix.so`, which only `libpmix-dev`
+  ships; without it the plugin fails with `can not load PMIx library`. Inside the
+  container, the PMIx client reaches the step's PMIx server over loopback TCP
+  (`PMIX_SERVER_URI…=tcp4://127.0.0.1:…`). Apptainer shares the host network namespace,
+  so no bind mounts are needed, but running containers with network isolation would break
+  the launch.
+- **Transport:** Open MPI is pinned to `pml=ob1`, `btl=self,vader,tcp`, and
+  `btl_tcp_if_include=10.10.0.0/24` (`mpi.MCA`), so inter-node traffic can only use the
+  cabled fabric. Two ranks on one worker run in separate Apptainer user namespaces, which
+  rules out cross-memory attach, so `btl_vader_single_copy_mechanism=none`.
+- **Rank failure:** `KillOnBadExit=1` in `slurm.conf`. Without it, a rank whose peer has
+  died waits forever: measured, the survivor was still waiting when the test gave up at
+  120 s. With it, the step ends in 0.3–0.4 s.
+
+### Acceptance checks (`emu mpi-verify`)
+
+| Check | What it proves |
+|---|---|
+| `mpi_versions_match` | `libopenmpi3t64` and `libpmix2t64` versions are identical on the host and in the image, and `dcbench` launches both natively and in the container |
+| `mpi_placement` | one rank per allocated worker, in rank order, inside the image, as UID 2000, in the Slurm step cgroup |
+| `mpi_intranode` | two containerised ranks on one worker communicate over shared memory |
+| `mpi_transport_tcp` | a W1→W8 stream appears on every switch egress port along the route (S1→S2→S3→S4→W8) |
+| `mpi_rank_failure` | rank 1 exits 3 while rank 0 blocks waiting for it: the step ends within 30 s, the failing code shows up in srun's stderr, and nothing is left running |
+| `mpi_cancel_cleanup` | `scancel` of a batch job with containerised ranks leaves no processes, no job cgroups, and no root-owned runtime processes |
+
+Result on the dev machine (8 workers, chain): **all 6 checks pass.** W1→W8 streamed
+403 MB at 957 Mb/s, and each of the four switch egress ports on the route carried 421 MB
+(payload plus TCP/IP headers). A rank failure ended the step in 0.4 s, and cancellation
+cleaned up in 1.5 s.
+
+**Exit codes:** after a rank failure, `srun` (and the batch job) return **143**, not the
+rank's code. Slurm reports the highest task exit code, and the surviving rank, killed by
+SIGTERM, counts as 128+15. The real cause is only in srun's stderr
+(`task 1: Exited with exit code 3`). The harness must record per-task outcomes rather than
+trust the step's exit code.
+
+### Microbenchmarks (`emu mpi-bench`, PRD F6)
+
+<!-- MPI-BENCH-RESULTS -->
+
 ## Known limitations
 
 - **CPU is shared.** All containers share the Docker VM's CPUs, so this setup cannot
@@ -291,14 +345,20 @@ What it shows (emulation, evidence tier "designed"):
   resolution in the LinuxKit VM. `--latency-us` is therefore off by default, and `verify`
   fails when the measured RTT doesn't match. Without netem the fabric's baseline RTT is
   about 0.12 ms.
+- **Per-message timing is not representative.** The shaper's token bucket must hold
+  about 4 ms of traffic (500 KB at 1 Gb/s): with smaller buckets the VM's timer
+  resolution caps a 1 Gb/s link at 470–590 Mb/s. After an idle gap, a message that fits
+  in the bucket crosses at memory speed. So MPI small-message latency is a few µs instead
+  of tens of µs, and ping-pong bandwidth below a few MB is inflated (1 MiB measured
+  1.7 Gb/s on a 1 Gb/s path). `mpi-bench` flags these rows `burst_affected`. Streaming
+  bandwidth, contention, and collectives moving many MB per link are unaffected.
 - **No management network yet.** Nodes can only reach each other, so Grafana and similar
   web UIs aren't reachable from the Mac until C0 gets a separate port-published interface
   (planned with the monitoring increment).
 
 ## Next increments
 
-1. MPI: Open MPI with the TCP BTL, ping-pong/bandwidth/collective benchmarks (F6).
-2. Monitoring: node_exporter, Prometheus and Grafana on C0, plus a management interface for
+1. Monitoring: node_exporter, Prometheus and Grafana on C0, plus a management interface for
    browser access (F8).
-3. Failure experiments (PRD §8, §10): kill a worker, interrupt a link (take a veth down),
+2. Failure experiments (PRD §8, §10): kill a worker, interrupt a link (take a veth down),
    remove NFS access; measure detection time and request outcomes.

@@ -102,10 +102,20 @@ def make_plan(topo: Topology, n_workers: int | None = None, gbps: float | None =
     return plan
 
 
+def tbf_burst_bytes(gbps: float) -> int:
+    """Token-bucket depth for a shaped link.
+
+    Must hold at least one GSO super-packet (64 KiB) and one timer tick of traffic: in the
+    Docker Desktop VM, smaller buckets cap a 1 Gb/s link at 470–590 Mb/s. The cost is that a
+    link idle for a tick lets this many bytes through at memory speed, so per-message
+    timings below a few times this size are not representative (see mpi.py).
+    """
+    return max(256 * 1024, int(gbps * 1e9) // 8 // 250)
+
+
 def shaping_commands(ns: str, dev: str, gbps: float, latency_us: float | None) -> list[str]:
     rate_bps = int(gbps * 1e9)
-    # Burst must hold at least one GSO super-packet (64 KiB) and one timer tick of traffic.
-    burst = max(256 * 1024, rate_bps // 8 // 250)
+    burst = tbf_burst_bytes(gbps)
     cmds = [f"tc -n {ns} qdisc replace dev {dev} root handle 1: tbf rate {rate_bps}bit "
             f"burst {burst} latency {TBF_QUEUE_LATENCY_MS}ms"]
     if latency_us:

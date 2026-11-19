@@ -3,3 +3,4 @@
 !emu/node-init.sh
 !emu/slurm-epilog.sh
 !src/daisychain/stage.py
+!emu/mpi/dcbench.c

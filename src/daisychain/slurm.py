@@ -72,6 +72,9 @@ def render_slurm_conf(plan: emu.Plan, cores: int, memory_mb: int, hw: dict[str, 
         "JobCompLoc=/var/log/slurm/jobcomp.log",
         "AccountingStorageType=accounting_storage/none",
         "MpiDefault=none",
+        # A task that exits non-zero ends its whole step. Without this, MPI ranks whose
+        # peer died wait forever (PRD F10); measured: >120 s hang vs 0.3 s teardown.
+        "KillOnBadExit=1",
         "ReturnToService=2",
         f"KillWait={KILL_WAIT_S}",
         "Epilog=/etc/slurm/epilog.sh",

@@ -7,6 +7,7 @@ import datetime as dt
 import json
 import secrets
 import sys
+import time
 from pathlib import Path
 
 from . import collect_inventory, emu, inventory, schemas
@@ -296,6 +297,86 @@ def cmd_emu_staging_bench(args) -> int:
     return 0
 
 
+def cmd_emu_mpi_verify(args) -> int:
+    from dataclasses import asdict
+
+    from . import mpi
+
+    plan = emu.plan_from_running()
+    mpi.ensure_staged(plan, rebuild=args.rebuild)
+    print(f"MPI in containerised Slurm steps on {plan.topo.name}, {len(plan.hosts) - 1} "
+          "worker(s) — emulation")
+    checks = mpi.verify(plan)
+    ok = all(c.ok for c in checks)
+    if args.output:
+        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.output).write_text(json.dumps(
+            {"topology": plan.topo.name, "workers": len(plan.hosts) - 1, "ok": ok,
+             "launch": mpi.srun_cmd(["<nodes>"], "<args>"),
+             "checks": [asdict(c) for c in checks]}, indent=2) + "\n")
+        print(f"wrote {args.output}")
+    print("PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def _fmt_measured(r) -> str:
+    m = r.measured
+    if r.bench == "pingpong":
+        return f"{m['lat_us_p50']:.1f} µs, {m['mbps_p50']:.0f} Mb/s"
+    if r.bench == "bw":
+        return f"{m['mbps']:.0f} Mb/s"
+    if r.bench == "layer":
+        return f"{m['interval_ms']:.2f} ms/batch"
+    return f"{m['us_p50'] / 1000:.2f} ms"
+
+
+def _fmt_predicted(r) -> str:
+    p = r.predicted
+    if "mbps" in p:
+        return f"{p['mbps']:.0f} Mb/s"
+    if "us_min" in p:
+        return f"≥{p['us_min'] / 1000:.2f} ms"
+    if "interval_ms" in p:
+        return f"≥{p['interval_ms']:.2f} ms/batch"
+    if "serialization_us" in p:
+        return f"≥{p['serialization_us']:.1f} µs wire"
+    return ""
+
+
+def cmd_emu_mpi_bench(args) -> int:
+    from dataclasses import asdict
+
+    from . import mpi
+
+    plan = emu.plan_from_running()
+    image_id = mpi.ensure_staged(plan)
+    groups = args.groups.split(",")
+    n_workers = len(plan.hosts) - 1
+    counts = [int(c) for c in args.counts.split(",") if int(c) <= n_workers]
+    burst = emu.tbf_burst_bytes(plan.gbps)
+    run_id = f"{dt.datetime.now(dt.timezone.utc):%Y%m%dT%H%M%SZ}-mpi-microbench-{secrets.token_hex(3)}"
+    print(f"{run_id}: {','.join(groups)} on {plan.topo.name}, N={counts}, {args.repeats} "
+          f"repeat(s) — emulation, evidence tier 'designed'")
+    t0 = time.monotonic()
+    rows = mpi.bench(plan, groups, counts, args.repeats, args.microbatches, args.compute_us)
+    print(f"\n{len(rows)} measurements in {time.monotonic() - t0:.0f}s "
+          f"(* = within the shaper's {burst // 1000} KB burst; not representative)\n")
+    print(_table(["group", "bench", "nodes", "bytes", "measured (median)", "bound"],
+                 [[r.group, r.bench, f"{r.nodes[0]}..{r.nodes[-1]} ({len(r.nodes)})",
+                   f"{r.bytes}{'*' if r.burst_affected else ''}", _fmt_measured(r),
+                   _fmt_predicted(r)] for r in rows]))
+    if args.output:
+        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.output).write_text(json.dumps(
+            {"run_id": run_id, "experiment": "mpi-microbench", "evidence_tier": "designed",
+             "topology": plan.topo.name, "gbps": plan.gbps, "shaper_burst_bytes": burst,
+             "image_artifact": image_id, "mca": mpi.MCA,
+             "launch": mpi.srun_cmd(["<nodes>"], "<args>"),
+             "rows": [asdict(r) for r in rows]}, indent=2) + "\n")
+        print(f"\nwrote {args.output}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="daisychain", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -379,6 +460,20 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--cache", default="cold", help="comma list of cold,warm-server")
     c.add_argument("--output", help="write JSON report here")
     c.set_defaults(func=cmd_emu_staging_bench)
+
+    c = em.add_parser("mpi-verify",
+                      help="MPI in containers: versions, placement, TCP path, failure, cleanup")
+    c.add_argument("--rebuild", action="store_true", help="rebuild and restage the MPI image")
+    c.add_argument("--output", help="write JSON report here")
+    c.set_defaults(func=cmd_emu_mpi_verify)
+    c = em.add_parser("mpi-bench", help="F6 ping-pong, bandwidth, collective, layer benchmarks")
+    c.add_argument("--groups", default="p2p,cross,coll,layer")
+    c.add_argument("--counts", default="2,4,8", help="rank counts for collectives/pipelines")
+    c.add_argument("--repeats", type=int, default=3)
+    c.add_argument("--microbatches", type=int, default=32)
+    c.add_argument("--compute-us", type=float, default=0, help="per-stage busy time (layer)")
+    c.add_argument("--output", help="write JSON report here")
+    c.set_defaults(func=cmd_emu_mpi_bench)
 
     c = sub.add_parser("validate", help="validate JSON/JSONL files against a schema")
     c.add_argument("schema", choices=schemas.SCHEMA_NAMES)

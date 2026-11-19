@@ -23,8 +23,9 @@ components:
       Same version on controller and every worker. Decide with the container launch
       approach (decision 4); see https://slurm.schedmd.com/containers.html.
       Emulated cluster (2026-11-19): 23.11.4 passes allocation, cgroup v2 limits,
-      exit-code and cancellation checks. Its mpi/pmix plugin failed to load PMIx;
-      re-check when choosing the MPI build. Not yet verified on real nodes.
+      exit-code and cancellation checks. mpi/pmix_v5 loads once libpmix-dev is installed
+      (it dlopens the unversioned libpmix.so). KillOnBadExit=1 so a dead rank ends its
+      step. Not yet verified on real nodes.
 
   container_runtime:
     candidate: >
@@ -41,17 +42,25 @@ components:
       Desktop VM, so the emulator stages sandbox directories; re-test SIF on hardware.
 
   mpi:
-    candidate: Open MPI (distribution package), TCP BTL for inter-node traffic
+    candidate: >
+      Open MPI 4.1.6-7ubuntu2 (Ubuntu 24.04 openmpi-bin), pml=ob1, btl=self,vader,tcp,
+      btl_tcp_if_include=<data subnet>; launched with srun --mpi=pmix … apptainer exec
     pinned: null
-    status: open
+    status: candidate
     notes: >
-      Same build inside the image and on the host. Record the transport MPI actually
-      selects (e.g. --mca btl_base_verbose) and confirm the inter-node path is TCP.
+      Same package and the same dcbench build on the host and in the MPI job image.
+      Emulated cluster (2026-11-19): versions match, placement, intra-node, TCP path
+      (link counters on every hop), rank-failure and cancellation checks pass on 8
+      workers. Transport is forced by MCA settings, so a missing TCP path fails the
+      launch instead of silently using another one. Re-check on hardware.
 
   pmix:
-    candidate: Version matching the Slurm and Open MPI builds
+    candidate: 5.0.1-4.1build1 (Ubuntu 24.04 libpmix2t64 + libpmix-dev), shared by Slurm and Open MPI
     pinned: null
-    status: open
+    status: candidate
+    notes: >
+      The containerised PMIx client talks to slurmstepd over loopback TCP, so job
+      containers must share the host network namespace (Apptainer's default).
 
   nfs:
     candidate: Kernel NFS server + nfs-common (Ubuntu 24.04), NFSv4.2 only
