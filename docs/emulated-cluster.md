@@ -122,10 +122,51 @@ stores limits in whole minutes and checks them about every 30 s.
 **Implication for F10/§9:** don't rely on Slurm time limits to detect failures within
 30 s. The router's own deadlines and health checks must enforce that bound.
 
-Not covered yet: containerised job steps (the rest of the §6 gate), MPI launch through
+Not covered yet: MPI launch through
 Slurm (PMIx fails to load: `mpi/pmix_v5: can not load PMIx library`, harmless while
 `MpiDefault=none`), and `sacct` accounting (needs `slurmdbd` plus a database; job records
 currently go to `jobcomp.log`).
+
+## Containerised job steps
+
+Covers the rest of the PRD §6 Slurm/container gate. The approach and why it was chosen are
+in [m0-decisions.md](m0-decisions.md#4-slurmcontainer-launch-approach-and-mpi-transport--container-launch-proposed-mpi-open).
+
+```sh
+uv run daisychain emu container-verify --output results/emu/container-verify.json
+uv run daisychain emu stage-image --image <docker image> --name <name>   # any image
+docker exec -u dcuser dc-C0 srun -N2 apptainer exec /var/lib/daisychain/images/probe python3 --version
+```
+
+- **Images:** built with Docker. `stage-image` saves the image, converts it to an Apptainer
+  sandbox on C0, and copies it to `/var/lib/daisychain/images/<name>` on every worker. The
+  Docker image ID is recorded in each copy and checked for consistency. For now the copy
+  goes through the Docker host, not the emulated fabric; NFS staging will move it onto the
+  fabric so the transfer can be measured.
+- **Probe image:** `emu/probe` (Python 3.12 on Debian 12). The nodes run Ubuntu 24.04, so
+  checks can tell they really are inside the image.
+- **Runtime:** non-setuid Apptainer 1.5.5. A running containerised step on a worker looks
+  like this (from `ps`):
+
+  ```
+  root     slurmstepd: [10.0]
+  dcuser     └ Apptainer runtime parent: probe
+  dcuser         └ /usr/bin/sleep 120
+  ```
+
+| Check | Result (8 workers) |
+|---|---|
+| `container_staged` | same image ID on all 8 workers |
+| `container_identity` | on every worker the task runs as UID 2000, sees Debian 12, and sits in its Slurm step's cgroup |
+| `container_limits_on_process` | `memory.max` = 200 MiB and 1 CPU within the worker's share, inside the container, on W1 and W8 |
+| `container_memory_enforced` | 300 MiB allocation under `--mem=100M` is OOM-killed |
+| `container_exit_codes` | exit codes propagate through `srun` and `sbatch --wait` |
+| `container_cancel_cleanup` | everything gone 6.7 s after `scancel`; no job cgroups left; no root-owned runtime processes while running |
+
+**Emulator-only workaround:** running `.sif` files fails inside the Docker Desktop VM
+(`exec /usr/bin/true failed: invalid argument` once squashfuse mounts the image; running
+the same image unpacked works). So images are staged as sandbox directories. Re-test SIF
+on real hardware before choosing the image format there.
 
 ## Known limitations
 
@@ -148,10 +189,8 @@ currently go to `jobcomp.log`).
 
 ## Next increments
 
-1. Containerised job steps inside Slurm allocations (rest of the PRD §6 gate):
-   choose the runtime (e.g. rootless podman or apptainer) and verify limits and cleanup.
-2. NFS: export from C0 (kernel nfsd may not be available in the Docker Desktop VM, in which
+1. NFS: export from C0 (kernel nfsd may not be available in the Docker Desktop VM, in which
    case use NFS-Ganesha in userspace), plus checksum-verified staging to worker local disk (F7).
-3. MPI: Open MPI with the TCP BTL, ping-pong/bandwidth/collective benchmarks (F6).
-4. Monitoring: node_exporter, Prometheus and Grafana on C0, plus a management interface for
+2. MPI: Open MPI with the TCP BTL, ping-pong/bandwidth/collective benchmarks (F6).
+3. Monitoring: node_exporter, Prometheus and Grafana on C0, plus a management interface for
    browser access (F8).

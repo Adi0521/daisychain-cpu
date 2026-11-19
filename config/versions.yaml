@@ -27,12 +27,18 @@ components:
       re-check when choosing the MPI build. Not yet verified on real nodes.
 
   container_runtime:
-    candidate: Docker Engine (rootless where feasible), alternatives podman / apptainer
+    candidate: >
+      Build with Docker; run job steps with Apptainer 1.5.5 (ppa:apptainer/ppa, non-setuid)
+      via `srun … apptainer exec <staged image>`
     pinned: null
-    status: open
+    status: candidate
     notes: >
       PRD §6 gate: no unrestricted Docker daemon access just to launch jobs. The runtime
-      must let Slurm track and limit the actual worker processes.
+      must let Slurm track and limit the actual worker processes. Apptainer runs as the
+      submitting user with no daemon, so container processes stay in the Slurm step
+      cgroup. Emulated cluster (2026-11-19): identity, limits, OOM, exit-code and
+      cancellation checks pass on 8 workers. SIF via squashfuse fails inside the Docker
+      Desktop VM, so the emulator stages sandbox directories; re-test SIF on hardware.
 
   mpi:
     candidate: Open MPI (distribution package), TCP BTL for inter-node traffic

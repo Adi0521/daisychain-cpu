@@ -51,11 +51,36 @@ inventory check shows the same version on every node.
 Chosen during M1 from measured memory and phase timing. The p95 latency limit is frozen
 before any scaling run and recorded in each manifest's `measurement.p95_latency_limit_ms`.
 
-### 4. Slurm/container launch approach and MPI transport — **open**
+### 4. Slurm/container launch approach and MPI transport — **container launch proposed; MPI open**
 
 Must pass the PRD §6 two-node gate during M2: launch on the allocated hosts, enforce or
 verify limits on the real container processes, propagate exit codes, and clean up on
 cancellation. Record the chosen integration and the evidence here.
+
+**Proposed launch approach:** build images with Docker, convert them to Apptainer images,
+stage them to each worker's local disk, and launch with
+`srun … apptainer exec <image> <cmd>` (Apptainer 1.5.5, non-setuid).
+
+Why this over the alternatives on [Slurm's containers page](https://slurm.schedmd.com/containers.html):
+
+- **Rootless with no daemon:** containers run as the submitting user through user
+  namespaces. Nobody needs Docker daemon access to launch a job (PRD §6).
+- **Slurm keeps control:** container processes stay in the Slurm step's cgroup, so Slurm's
+  own process tracking, cgroup limits and kill-on-cancel apply unchanged. Rootless podman
+  without systemd needs `--cgroups=disabled`-style workarounds to get the same result.
+- **Fewer moving parts than Slurm's native OCI mode** (`srun --container` + `oci.conf` +
+  crun/runc), which in 23.11 needs a hand-written runtime command set and OCI bundles.
+- **Fits the storage plan:** an image is a single file or directory that can be staged
+  like model weights.
+
+Evidence so far (emulated cluster, 8 workers, `daisychain emu container-verify`):
+tasks run inside the image as UID 2000 and inside their Slurm step cgroup on every
+worker; `-c1 --mem=200M` limits apply inside the container on W1 and W8; a 300 MiB
+allocation under `--mem=100M` is OOM-killed; exit codes propagate through `srun` and
+`sbatch`; after `scancel`, tasks that ignore SIGTERM are gone within 6.7 s, leaving no job
+cgroups; and no root-owned runtime process exists while jobs run. **Not yet
+satisfied:** the gate needs two *physical* nodes. MPI launch inside the container is still
+open (the Slurm PMIx plugin currently fails to load).
 
 ### 5. Separate monitoring/storage host — **open; initial analysis below**
 
@@ -86,6 +111,7 @@ These numbers are static flow counts, not simulation results or measurements.
 
 | Date | Change | Reason |
 |---|---|---|
+| 2026-11-19 | Proposed container launch: Docker-built images run with non-setuid Apptainer 1.5.5 under `srun`; all container gate checks pass in emulation | Decision 4 |
 | 2026-11-19 | Slurm 23.11.4 on the emulated cluster: 1/2/4/8-node allocation, cgroup v2 CPU/RAM limits, exit codes, cancellation and timeout cleanup all pass; Slurm time-limit enforcement takes ~1–2 min, so the 30 s failure bound must come from the router | Decision 4 groundwork |
 | 2026-11-19 | Emulated cluster added (docs/emulated-cluster.md); chain vs star cross-traffic in emulation: 932 vs 3679 Mb/s, matching the static prediction | No hardware yet |
 | 2026-11-19 | Initial M0 scaffolding: topology files, inventory tooling, version matrix template, benchmark schemas v1 | Start of M0 |

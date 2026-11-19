@@ -197,6 +197,40 @@ def cmd_emu_slurm_verify(args) -> int:
     return 0 if ok else 1
 
 
+def cmd_emu_stage_image(args) -> int:
+    from . import containers
+
+    plan = emu.plan_from_running()
+    if args.image == containers.PROBE_IMAGE:
+        containers.build_probe()
+    containers.stage_image(plan, args.image, args.name)
+    return 0
+
+
+def cmd_emu_container_verify(args) -> int:
+    from dataclasses import asdict
+
+    from . import containers
+
+    plan = emu.plan_from_running()
+    if None in containers.staged_ids(plan, containers.PROBE_NAME).values():
+        containers.build_probe()
+        containers.stage_image(plan, containers.PROBE_IMAGE, containers.PROBE_NAME)
+    print(f"Containerised Slurm steps on {plan.topo.name}, {len(plan.hosts) - 1} worker(s) "
+          "— emulation")
+    checks = containers.verify(plan)
+    ok = all(c.ok for c in checks)
+    if args.output:
+        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.output).write_text(json.dumps(
+            {"topology": plan.topo.name, "workers": len(plan.hosts) - 1, "ok": ok,
+             "launcher": containers.launcher().strip(),
+             "checks": [asdict(c) for c in checks]}, indent=2) + "\n")
+        print(f"wrote {args.output}")
+    print("PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="daisychain", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -253,6 +287,15 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--skip-slow", action="store_true", help="skip the ~1 min timeout check")
     c.add_argument("--output", help="write JSON report here")
     c.set_defaults(func=cmd_emu_slurm_verify)
+
+    c = em.add_parser("stage-image", help="convert a Docker image and stage it on every worker")
+    c.add_argument("--image", default="daisychain/probe:dev")
+    c.add_argument("--name", default="probe", help="directory name under the image store")
+    c.set_defaults(func=cmd_emu_stage_image)
+    c = em.add_parser("container-verify",
+                      help="Slurm/container gate: identity, limits, exit codes, cleanup")
+    c.add_argument("--output", help="write JSON report here")
+    c.set_defaults(func=cmd_emu_container_verify)
 
     c = sub.add_parser("validate", help="validate JSON/JSONL files against a schema")
     c.add_argument("schema", choices=schemas.SCHEMA_NAMES)

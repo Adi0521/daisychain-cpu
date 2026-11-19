@@ -19,6 +19,7 @@ from . import emu
 
 PARTITION = "emu"
 USER = "dcuser"
+USER_UID = 2000  # matches emu/node.Dockerfile
 KILL_WAIT_S = 5
 SLURMD_RESERVED_MB = 128  # left outside Slurm's RealMemory for slurmd/munged themselves
 
@@ -182,7 +183,8 @@ LIMIT_PROBE = (
 )
 
 
-def check_limits(plan: emu.Plan, cores: int, host_cpus: int) -> Check:
+def check_limits(plan: emu.Plan, cores: int, host_cpus: int, launcher: str = "",
+                 label: str = "") -> Check:
     """Limits on the real task processes, on the first and last worker.
 
     The last worker matters: CPU-binding bugs only appear on workers whose CPU share does
@@ -192,7 +194,8 @@ def check_limits(plan: emu.Plan, cores: int, host_cpus: int) -> Check:
     allowed = dict(zip(workers, emu.worker_cpusets(len(workers), cores, host_cpus)))
     parts, data, ok = [], {}, True
     for w in dict.fromkeys([workers[0], workers[-1]]):
-        r = _as_user(plan, f"srun -w {w} -N1 -n1 -c1 --mem=200M -t 1 bash -c '{LIMIT_PROBE}'")
+        r = _as_user(plan, f"srun -w {w} -N1 -n1 -c1 --mem=200M -t 1 "
+                           f"{launcher}bash -c '{LIMIT_PROBE}'")
         mem = re.search(r"mem=(\d+)", r.stdout)
         cpus = re.search(r"cpus=(\d+)", r.stdout)
         bound = re.search(r"Cpus_allowed_list:\s*(\S+)", r.stdout)
@@ -203,28 +206,29 @@ def check_limits(plan: emu.Plan, cores: int, host_cpus: int) -> Check:
         ok &= r.returncode == 0 and mem_b == 200 * 2**20 and ncpu == 1 and in_share
         parts.append(f"{w}: memory.max={mem_b}, CPUs={ncpu} (cpu {cpu_id}, share {allowed[w]})")
         data[w] = {"memory_max": mem_b, "cpus": ncpu, "cpu": cpu_id, "share": allowed[w]}
-    return Check("limits_on_process", ok,
+    return Check(f"{label}limits_on_process", ok,
                  "; ".join(parts) + f" — want memory.max={200 * 2**20}, 1 CPU inside the share",
                  data)
 
 
-def check_oom(plan: emu.Plan) -> Check:
-    r = _as_user(plan, "srun -N1 -n1 -c1 --mem=100M -t 1 "
+def check_oom(plan: emu.Plan, launcher: str = "", label: str = "") -> Check:
+    r = _as_user(plan, f"srun -N1 -n1 -c1 --mem=100M -t 1 {launcher}"
                        "python3 -c 'x = b\"x\" * (300 << 20); print(len(x))'")
     text = (r.stdout + r.stderr).lower()
     ok = r.returncode != 0 and ("oom" in text or "out of memory" in text or "out_of_memory" in text)
-    return Check("memory_enforced", ok,
+    return Check(f"{label}memory_enforced", ok,
                  f"300 MiB allocation under --mem=100M: rc={r.returncode}"
                  + (" (OOM-killed)" if ok else f"; output: {text.strip()[-200:]}"))
 
 
-def check_exit_codes(plan: emu.Plan) -> Check:
-    r1 = _as_user(plan, "srun -N1 -t 1 bash -c 'exit 3'")
-    r2 = _as_user(plan, "sbatch --parsable --wait -N1 -t 1 -o /dev/null --wrap 'exit 4'")
+def check_exit_codes(plan: emu.Plan, launcher: str = "", label: str = "") -> Check:
+    r1 = _as_user(plan, f"srun -N1 -t 1 {launcher}bash -c 'exit 3'")
+    r2 = _as_user(plan, "sbatch --parsable --wait -N1 -t 1 -o /dev/null "
+                        f"--wrap '{launcher}bash -c \"exit 4\"'")
     job = r2.stdout.strip().split(";")[0]
     exit_field = _job_field(plan, job, "ExitCode") if job else None
     ok = r1.returncode == 3 and r2.returncode == 4 and exit_field == "4:0"
-    return Check("exit_codes", ok,
+    return Check(f"{label}exit_codes", ok,
                  f"srun rc={r1.returncode} (want 3); sbatch --wait rc={r2.returncode} "
                  f"(want 4); job {job} ExitCode={exit_field} (want 4:0)")
 
@@ -251,13 +255,26 @@ CANCEL_STEP = (
 )
 
 
-def check_cancel_cleanup(plan: emu.Plan) -> Check:
+def _root_container_procs(nodes: list[str]) -> dict[str, list[str]]:
+    """Root-owned container runtime processes; a rootless launch must create none."""
+    found = {}
+    for n in nodes:
+        r = emu.exec_(n, "pgrep", "-u", "root", "-af", "apptainer|starter|squashfuse|conmon|crun",
+                      check=False)
+        lines = [l for l in r.stdout.splitlines() if "pgrep" not in l]
+        if lines:
+            found[n] = lines
+    return found
+
+
+def check_cancel_cleanup(plan: emu.Plan, launcher: str = "", label: str = "") -> Check:
+    name = f"{label}cancel_cleanup"
     n = min(2, len(plan.hosts) - 1)
-    script = f"#!/bin/bash\nsrun --ntasks-per-node=1 bash -c '{CANCEL_STEP}'\n"
+    script = f"#!/bin/bash\nsrun --ntasks-per-node=1 {launcher}bash -c '{CANCEL_STEP}'\n"
     r = _as_user(plan, f"sbatch --parsable -N{n} -t 5 -o /dev/null <<'EOF'\n{script}EOF")
     job = r.stdout.strip().split(";")[0]
     if r.returncode != 0 or not job:
-        return Check("cancel_cleanup", False, f"submit failed: {r.stderr.strip()}")
+        return Check(name, False, f"submit failed: {r.stderr.strip()}")
 
     deadline = time.monotonic() + 30
     nodes: list[str] = []
@@ -269,8 +286,9 @@ def check_cancel_cleanup(plan: emu.Plan) -> Check:
         time.sleep(1)
     if not nodes:
         _as_user(plan, f"scancel {job}")
-        return Check("cancel_cleanup", False, f"job {job} never had all processes running")
+        return Check(name, False, f"job {job} never had all processes running")
 
+    root_procs = _root_container_procs(nodes) if launcher else {}
     t0 = time.monotonic()
     _as_user(plan, f"scancel {job}")
     left = _user_procs(plan)
@@ -280,13 +298,15 @@ def check_cancel_cleanup(plan: emu.Plan) -> Check:
     elapsed = time.monotonic() - t0
     state = _wait_terminal(plan, job)
     cgroups = _job_cgroups(plan, job, nodes)
-    ok = not left and state == "CANCELLED" and not cgroups
-    return Check("cancel_cleanup", ok,
-                 f"job {job} on {','.join(nodes)}: state={state}, "
-                 f"{'all processes gone' if not left else 'LEFTOVER ' + str(left)} "
-                 f"after {elapsed:.1f}s (KillWait={KILL_WAIT_S}s; tasks ignored SIGTERM); "
-                 f"job cgroups left: {cgroups or 'none'}",
-                 {"cleanup_s": round(elapsed, 1)})
+    ok = not left and state == "CANCELLED" and not cgroups and not root_procs
+    detail = (f"job {job} on {','.join(nodes)}: state={state}, "
+              f"{'all processes gone' if not left else 'LEFTOVER ' + str(left)} "
+              f"after {elapsed:.1f}s (KillWait={KILL_WAIT_S}s; tasks ignored SIGTERM); "
+              f"job cgroups left: {cgroups or 'none'}")
+    if launcher:
+        detail += f"; root-owned runtime processes while running: {root_procs or 'none'}"
+    return Check(name, ok, detail,
+                 {"cleanup_s": round(elapsed, 1), "root_container_procs": root_procs})
 
 
 def _wait_terminal(plan: emu.Plan, job: str, timeout_s: float = 30) -> str | None:
