@@ -184,8 +184,27 @@ def running_nodes() -> dict[str, dict]:
     return nodes
 
 
-def up(plan: Plan, build: bool = False, worker_cpus: float | None = None,
-       worker_memory: str | None = None, log=print) -> None:
+def docker_cpus() -> int:
+    return int(_docker("info", "-f", "{{.NCPU}}").stdout.strip())
+
+
+def worker_cpusets(n_workers: int, cores: int, host_cpus: int) -> list[str]:
+    """Assign each worker `cores` CPU ids, round-robin over the Docker VM's CPUs.
+
+    Containers are not cpuset-pinned (Slurm's hwloc view inside a pinned container doesn't
+    match its CPU numbering, which breaks job binding). Instead Slurm reserves every other
+    CPU via CpuSpecList so jobs on worker i can only use its assigned ids. With more worker
+    cores than VM CPUs, workers overlap: fine for function tests, and one reason this
+    emulator says nothing about compute scaling.
+    """
+    if not 1 <= cores <= host_cpus:
+        raise EmuError(f"--worker-cores must be in 1..{host_cpus} (Docker VM CPUs)")
+    return [",".join(str((cores * i + j) % host_cpus) for j in range(cores))
+            for i in range(n_workers)]
+
+
+def up(plan: Plan, build: bool = False, worker_cores: int = 2, worker_memory_mb: int = 1024,
+       slurm: bool = True, keep_on_failure: bool = False, log=print) -> None:
     existing = running_nodes()
     if existing:
         raise EmuError(f"emulated cluster already exists ({len(existing)} containers); "
@@ -197,6 +216,9 @@ def up(plan: Plan, build: bool = False, worker_cpus: float | None = None,
     hosts_args = []
     for h, ip in plan.addresses.items():
         hosts_args += ["--add-host", f"{h}:{ip}"]
+    plan.labels["daisychain.worker_cores"] = str(worker_cores)
+    plan.labels["daisychain.worker_memory_mb"] = str(worker_memory_mb)
+    worker_cpusets(len(plan.hosts) - 1, worker_cores, docker_cpus())  # validates cores
     label_args = []
     for k, v in plan.labels.items():
         label_args += ["--label", f"{k}={v}"]
@@ -210,10 +232,12 @@ def up(plan: Plan, build: bool = False, worker_cpus: float | None = None,
             if role != "switch":
                 args += hosts_args
             if role == "worker":
-                if worker_cpus:
-                    args += ["--cpus", str(worker_cpus)]
-                if worker_memory:
-                    args += ["--memory", worker_memory]
+                # slurmd needs a writable, private cgroup v2 tree to enforce job limits.
+                # --privileged is confined to this local emulation (see docs).
+                args += ["--privileged", "--cgroupns=private",
+                         "--cpus", str(worker_cores),
+                         "--memory", f"{worker_memory_mb}m", "--memory-swap",
+                         f"{worker_memory_mb}m"]
             _docker(*args, IMAGE)
         log(f"started {len(plan.nodes)} containers")
 
@@ -226,9 +250,15 @@ def up(plan: Plan, build: bool = False, worker_cpus: float | None = None,
                 "bash", "-s", input=wiring_script(plan, pids))
         log(f"wired {len(plan.cables)} links at {plan.gbps} Gb/s per direction"
             + (f", {plan.latency_us} µs one-way delay" if plan.latency_us else ""))
+        if slurm:
+            from . import slurm as slurm_mod
+            slurm_mod.start(plan, worker_cores, worker_memory_mb, log=log)
     except Exception:
-        log("bring-up failed; removing partial cluster")
-        down(log=lambda *_: None)
+        if keep_on_failure:
+            log("bring-up failed; containers kept for debugging (`daisychain emu down` to remove)")
+        else:
+            log("bring-up failed; removing partial cluster")
+            down(log=lambda *_: None)
         raise
 
 

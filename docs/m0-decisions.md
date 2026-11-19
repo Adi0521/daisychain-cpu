@@ -86,5 +86,6 @@ These numbers are static flow counts, not simulation results or measurements.
 
 | Date | Change | Reason |
 |---|---|---|
+| 2026-11-19 | Slurm 23.11.4 on the emulated cluster: 1/2/4/8-node allocation, cgroup v2 CPU/RAM limits, exit codes, cancellation and timeout cleanup all pass; Slurm time-limit enforcement takes ~1–2 min, so the 30 s failure bound must come from the router | Decision 4 groundwork |
 | 2026-11-19 | Emulated cluster added (docs/emulated-cluster.md); chain vs star cross-traffic in emulation: 932 vs 3679 Mb/s, matching the static prediction | No hardware yet |
 | 2026-11-19 | Initial M0 scaffolding: topology files, inventory tooling, version matrix template, benchmark schemas v1 | Start of M0 |

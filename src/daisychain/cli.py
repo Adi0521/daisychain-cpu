@@ -137,7 +137,9 @@ def cmd_run_id(args) -> int:
 def cmd_emu_up(args) -> int:
     topo = Topology.load(args.topology)
     plan = emu.make_plan(topo, args.workers, args.gbps, args.latency_us, args.topology)
-    emu.up(plan, build=args.build, worker_cpus=args.worker_cpus, worker_memory=args.worker_memory)
+    emu.up(plan, build=args.build, worker_cores=args.worker_cores,
+           worker_memory_mb=args.worker_memory_mb, slurm=not args.no_slurm,
+           keep_on_failure=args.keep_on_failure)
     print(_table(["node", "address", "switch"],
                  [[h, plan.addresses[h], topo.hosts[h].switch] for h in plan.hosts]))
     print(f"\nshell: docker exec -it {emu.container(plan.hosts[0])} bash")
@@ -176,6 +178,25 @@ def cmd_emu_verify(args) -> int:
     return 0 if report["ok"] else 1
 
 
+def cmd_emu_slurm_verify(args) -> int:
+    from dataclasses import asdict
+
+    from . import slurm
+
+    plan = emu.plan_from_running()
+    print(f"Slurm checks on {plan.topo.name}, {len(plan.hosts) - 1} worker(s) — emulation")
+    checks = slurm.verify(plan, skip_slow=args.skip_slow)
+    ok = all(c.ok for c in checks)
+    if args.output:
+        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.output).write_text(json.dumps(
+            {"topology": plan.topo.name, "workers": len(plan.hosts) - 1, "ok": ok,
+             "checks": [asdict(c) for c in checks]}, indent=2) + "\n")
+        print(f"wrote {args.output}")
+    print("PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="daisychain", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -212,8 +233,10 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--workers", type=int, help="use only the first N workers")
     c.add_argument("--gbps", type=float, help="override link speed per direction")
     c.add_argument("--latency-us", type=float, help="add one-way delay per link endpoint")
-    c.add_argument("--worker-cpus", type=float)
-    c.add_argument("--worker-memory")
+    c.add_argument("--worker-cores", type=int, default=2, help="CPUs pinned per worker")
+    c.add_argument("--worker-memory-mb", type=int, default=1024, help="memory cap per worker")
+    c.add_argument("--no-slurm", action="store_true", help="network fabric only")
+    c.add_argument("--keep-on-failure", action="store_true", help="leave containers for debugging")
     c.add_argument("--build", action="store_true", help="rebuild the node image")
     c.set_defaults(func=cmd_emu_up)
     c = em.add_parser("down", help="remove all emulated containers")
@@ -226,6 +249,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="allowed shortfall of measured vs predicted aggregate")
     c.add_argument("--output", help="write JSON report here")
     c.set_defaults(func=cmd_emu_verify)
+    c = em.add_parser("slurm-verify", help="Slurm allocation, limits, exit codes, cleanup")
+    c.add_argument("--skip-slow", action="store_true", help="skip the ~1 min timeout check")
+    c.add_argument("--output", help="write JSON report here")
+    c.set_defaults(func=cmd_emu_slurm_verify)
 
     c = sub.add_parser("validate", help="validate JSON/JSONL files against a schema")
     c.add_argument("schema", choices=schemas.SCHEMA_NAMES)

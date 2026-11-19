@@ -16,12 +16,15 @@ components:
     notes: Record kernel from inventory. cgroup v2 expected; affects Slurm limit enforcement.
 
   slurm:
-    candidate: Distribution package for the chosen Ubuntu release
+    candidate: 23.11.4 (Ubuntu 24.04 slurm-wlm package)
     pinned: null
-    status: open
+    status: candidate
     notes: >
       Same version on controller and every worker. Decide with the container launch
       approach (decision 4); see https://slurm.schedmd.com/containers.html.
+      Emulated cluster (2026-11-19): 23.11.4 passes allocation, cgroup v2 limits,
+      exit-code and cancellation checks. Its mpi/pmix plugin failed to load PMIx;
+      re-check when choosing the MPI build. Not yet verified on real nodes.
 
   container_runtime:
     candidate: Docker Engine (rootless where feasible), alternatives podman / apptainer
