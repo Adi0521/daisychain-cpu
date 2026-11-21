@@ -44,7 +44,9 @@ uv run daisychain topology load config/topology/chain.yaml --pattern all-to-all
 uv run daisychain topology load config/topology/star.yaml --pattern fanout --payload-mb 1500
 
 # Emulated cluster (Docker): see docs/emulated-cluster.md
-uv run daisychain emu up && uv run daisychain emu verify && uv run daisychain emu down
+uv run daisychain emu up            # Grafana on http://127.0.0.1:3000 once it's up
+uv run daisychain emu verify        # also: slurm-, nfs-, container-, mpi-, monitor-verify
+uv run daisychain emu down
 
 # Benchmark records
 uv run daisychain run-id worker-scaling

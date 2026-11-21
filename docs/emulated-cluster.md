@@ -376,6 +376,95 @@ Dev machine, 8 workers, 1 Gb/s links, evidence tier "designed":
    first chain run reported 1172 Mb/s through a 1 Gb/s link. `dcbench bw` now divides
    total bytes by the slowest pair's time from a common barrier.
 
+## Monitoring
+
+Covers PRD F8 and the §9 visibility requirements. `emu up` starts it by default
+(`--no-monitoring` skips it):
+
+```sh
+uv run daisychain emu up                       # Grafana http://127.0.0.1:3000, Prometheus :9090
+uv run daisychain emu monitor-verify
+uv run daisychain emu monitor-overhead --output results/emu/monitor-overhead-chain.json
+uv run daisychain emu monitor-export --minutes 15 --output results/emu/metrics.json
+uv run daisychain monitoring render            # regenerate config/monitoring/ after code changes
+```
+
+| Component | Runs on | Provides |
+|---|---|---|
+| node_exporter 1.7.0 | C0 and every worker, on its data address | CPU, RAM, swap, disk, NIC bytes/errors, NFS client/server counters; textfile metrics (`daisychain_stage_*` model-load times written by `daisychain-stage`) |
+| node_exporter (netdev + qdisc only) | each switch, on an in-band management address on its bridge (S1–S4 = 10.10.0.2–.5) | per-port byte, drop and backlog counters, as a managed switch would expose |
+| `daisychain-slurm-exporter` (stdlib Python) | C0 | node states, CPUs allocated, jobs by state |
+| Prometheus v3.1.0, Grafana 11.4.0 | official images sharing C0's network namespace, so on C0 as far as the network is concerned | 5 s scrape, `TelemetryMissing` alert, provisioned dashboard |
+| `dc-mgmt` relay | separate unshaped management link into C0 | `127.0.0.1:3000/9090` on the Mac |
+
+Every scrape crosses the emulated fabric, so monitoring traffic shares the chain's links
+as it will on hardware. Browser traffic uses the management link instead.
+
+The generated configuration is committed under `config/monitoring/`: Prometheus config
+and rules, Grafana provisioning, and the dashboard JSON. These are the PRD's dashboard
+definitions and metrics configuration, and a test fails if they drift from the generator.
+
+The dashboard has rows for cluster health (per-node telemetry, Slurm nodes/jobs/CPUs),
+requests, hosts, fabric (inter-switch link utilisation as a fraction of capacity,
+switch→host ports, shaper drops and backlog), storage (NFS server/client, model-load time
+and outcome), emulator-only container CPU/memory, and monitoring itself.
+
+**Request metrics are a contract for now.** The router doesn't exist yet. The dashboard
+already queries the names it must export: `daisychain_router_queue_depth`,
+`daisychain_requests_in_flight{worker}`, `daisychain_requests_total{status}` and
+`daisychain_request_duration_seconds_bucket`. Those panels stay empty until then.
+
+### Acceptance checks (`emu monitor-verify`)
+
+| Check | What it proves | PRD |
+|---|---|---|
+| `targets_up` | every host, switch, Slurm and Prometheus target is up, at a 5 s interval | §9 |
+| `host_metrics` | CPU, memory, swap, disk, NIC bytes/errors for every host; NFS client counters on workers; nfsd on C0 | F8, §9 |
+| `switch_port_counters` | for a 50 MB W1→W8 transfer, the per-port bytes in Prometheus equal the shaper's own counters on every hop | §9 |
+| `slurm_job_state` | a submitted job shows RUNNING and allocated CPUs, then CANCELLED after `scancel` | §9 |
+| `staging_metrics` | model-load time and outcome reach Prometheus from every worker | §9 |
+| `missing_worker_detected` | a frozen worker (`docker pause`) shows `up=0` and fires `TelemetryMissing` within 30 s | §9 |
+| `dashboard` | the provisioned dashboard loads; all 34 panel queries run and return data, except the router panels | F8 |
+| `management_path` | dashboard traffic leaves C0 by the management link, not its data NIC | — |
+
+Result on the dev machine (8 workers, chain): **all 8 checks pass.** A frozen worker
+showed `up=0` after 7.9 s and the alert fired after 13.2 s, well inside the 30 s bound.
+RUNNING and CANCELLED job states appeared in Prometheus within 3.4 s and 4.0 s. On the star, all
+8 checks also pass (frozen worker visible after 7.8 s); its dashboard's inter-switch panel
+is empty by design. All
+earlier suites (`verify`, `slurm-verify`, `nfs-verify`, `container-verify`,
+`mpi-verify`) still pass with monitoring running.
+
+### Overhead (`emu monitor-overhead`)
+
+Monitoring "disabled" means Prometheus is paused, so nothing scrapes. Exporters stay
+running, but they only do work when scraped.
+
+| | Scraping on | Scraping off |
+|---|---|---|
+| Traffic into C0 | 279 kb/s (0.03% of 1 Gb/s) | 7 kb/s |
+| S2→S1 / S3→S2 / S4→S3 (towards C0) | +204 / +136 / +68 kb/s | — |
+| CPU: Prometheus / Grafana / all 13 exporters | 0.016 / 0.007 / 0.086 cores | 0.026 cores in total |
+| 4 cross-chain pairs, 4 MiB streams | 929–935 Mb/s | 928–939 Mb/s |
+| Alltoall, 8 ranks, 1 MiB per destination | 158–175 ms | 154–161 ms |
+
+Monitoring costs the fabric nothing measurable, and streaming bandwidth is unchanged. The
+alltoall result is inconclusive: two runs of 3 alternating repeats gave −1.8% and +6.9%,
+within the run-to-run spread on an oversubscribed 8-vCPU VM. The likely mechanism is
+exporter CPU, not bandwidth. Repeat on hardware with more repetitions before deciding
+whether monitoring needs its own host (decision 5).
+
+### Pitfalls found
+
+1. **Interface counters undercount wire bytes by ~4%.** A veth's `tx_bytes` counts each
+   segmentation-offloaded super-packet once with one header. The shaper (qdisc) counts
+   per-segment headers, i.e. bytes on the wire, which is what a switch port reports. The
+   fabric panels therefore use `node_qdisc_bytes_total`.
+2. **In a container, `/proc` shows the whole Docker VM.** CPU, memory, swap and disk
+   panels are identical for every node in the emulator. Network and NFS counters are per
+   network namespace and therefore correct. The emulator-only row exports each
+   container's own cgroup CPU and memory.
+
 ## Known limitations
 
 - **CPU is shared.** All containers share the Docker VM's CPUs, so this setup cannot
@@ -398,13 +487,10 @@ Dev machine, 8 workers, 1 Gb/s links, evidence tier "designed":
   of tens of µs, and ping-pong bandwidth below a few MB is inflated (1 MiB measured
   1.7 Gb/s on a 1 Gb/s path). `mpi-bench` flags these rows `burst_affected`. Streaming
   bandwidth, contention, and collectives moving many MB per link are unaffected.
-- **No management network yet.** Nodes can only reach each other, so Grafana and similar
-  web UIs aren't reachable from the Mac until C0 gets a separate port-published interface
-  (planned with the monitoring increment).
+- **Host CPU/memory/disk metrics are VM-wide** (see Monitoring pitfalls). Per-node
+  values in the emulator come from container cgroups only.
 
 ## Next increments
 
-1. Monitoring: node_exporter, Prometheus and Grafana on C0, plus a management interface for
-   browser access (F8).
-2. Failure experiments (PRD §8, §10): kill a worker, interrupt a link (take a veth down),
+1. Failure experiments (PRD §8, §10): kill a worker, interrupt a link (take a veth down),
    remove NFS access; measure detection time and request outcomes.

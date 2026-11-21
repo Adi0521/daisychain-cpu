@@ -115,6 +115,11 @@ the planning assumption (every link 1 Gb/s) gives:
   destination) took 162 vs 102 ms; a 4 MiB pipeline ran at 39.3 vs 39.8 ms per
   micro-batch. So a pipeline-parallel layout should be chain-tolerant, while
   allreduce/alltoall-heavy layouts are not (details in emulated-cluster.md, MPI).
+- Emulation check (monitoring on C0, 5 s scrape of 13 exporters): about 0.28 Mb/s into C0
+  and 0.11 CPU cores. Streaming bandwidth is unaffected; an alltoall effect (−1.8% /
+  +6.9% in two runs) is within noise. So far nothing argues for a separate monitoring
+  host on network grounds. CPU contention on C0 under real router load is still
+  unmeasured.
 
 Implications to confirm on hardware: a faster C0 uplink (or bonded NICs) changes the
 fan-out picture, but it is a hardware upgrade and must not be mixed into the chain-vs-star
@@ -133,6 +138,7 @@ measurements are still needed, including the server's disk, which the emulator h
 
 | Date | Change | Reason |
 |---|---|---|
+| 2026-11-20 | Monitoring on the emulated cluster: node_exporter on hosts and switches, Slurm exporter, Prometheus v3.1.0 + Grafana 11.4.0 on C0, generated config committed under config/monitoring. All checks pass; a frozen worker is visible in 7.9 s (bound 30 s). Monitoring overhead: 0.28 Mb/s into C0, 0.11 cores, no measurable bandwidth effect | Decision 5 evidence (emulation) |
 | 2026-11-19 | MPI in containerised Slurm steps (srun --mpi=pmix + Apptainer, Open MPI 4.1.6 over TCP); all MPI checks pass on chain and star. Emulated F6 results: cross-chain pairs get 927 vs 3646 Mb/s (star), alltoall 1.6× and allreduce 1.35× slower on the chain, pipeline and point-to-point identical. KillOnBadExit=1 added. Small-message latency is not measurable in emulation | Decision 4 (MPI), decision 5 evidence |
 | 2026-11-19 | NFSv4 storage + verified local staging on the emulated cluster. Cold start of 256 MiB to N workers: 2.5/4.7/9.2/18.4 s for N=1/2/4/8 (chain) and the same within noise on the star, so C0's NIC limits cold start, not the chain. NFS grace period (default 90 s) blocks opens after a server restart; emulator uses 15 s | Decision 5 evidence (emulation) |
 | 2026-11-19 | Proposed container launch: Docker-built images run with non-setuid Apptainer 1.5.5 under `srun`; all container gate checks pass in emulation | Decision 4 |

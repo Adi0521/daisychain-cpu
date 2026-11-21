@@ -524,9 +524,15 @@ def _wait_fresh_scrape() -> None:
 
 
 def check_targets(plan: emu.Plan) -> Check:
-    res = _get("/api/v1/targets")["data"]["activeTargets"]
     expected = {(job, c["labels"]["node"]) for job, cfgs in targets(plan).items() for c in cfgs}
-    up = {(t["labels"]["job"], t["labels"].get("node")) for t in res if t["health"] == "up"}
+    # Right after start-up, targets are "unknown" until their first scrape: allow two rounds.
+    deadline = time.monotonic() + 2 * SCRAPE_S + 2
+    while True:
+        res = _get("/api/v1/targets")["data"]["activeTargets"]
+        up = {(t["labels"]["job"], t["labels"].get("node")) for t in res if t["health"] == "up"}
+        if expected <= up or time.monotonic() > deadline:
+            break
+        time.sleep(1)
     intervals = {t["scrapeInterval"] for t in res}
     missing = sorted(expected - up)
     ok = not missing and intervals == {f"{SCRAPE_S}s"}
@@ -668,7 +674,8 @@ REQUEST_METRICS = ("daisychain_router_queue_depth", "daisychain_requests_in_flig
 
 def check_dashboard(plan: emu.Plan) -> Check:
     """Provisioned dashboard loads in Grafana; every panel query runs; all have data except
-    the request panels, whose metrics come from the router (not built yet)."""
+    the request panels, whose metrics come from the router (not built yet), and the
+    inter-switch panel on a topology without inter-switch links."""
     port = ui_ports()["grafana"]
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/dashboards/uid/{DASHBOARD_UID}",
                                 timeout=10) as r:
@@ -681,7 +688,8 @@ def check_dashboard(plan: emu.Plan) -> Check:
         for t in p.get("targets", []):
             n += 1
             try:
-                if not query(t["expr"]) and not any(m in t["expr"] for m in REQUEST_METRICS):
+                no_isl = p["title"] == "Inter-switch link utilisation" and not plan.topo.switch_links
+                if not query(t["expr"]) and not no_isl and not any(m in t["expr"] for m in REQUEST_METRICS):
                     empty.append(p["title"])
             except Exception as e:  # noqa: BLE001
                 errors.append(f"{p['title']}: {e}")
