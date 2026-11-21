@@ -200,18 +200,27 @@ def docker_cpus() -> int:
 
 
 def worker_cpusets(n_workers: int, cores: int, host_cpus: int) -> list[str]:
-    """Assign each worker `cores` CPU ids, round-robin over the Docker VM's CPUs.
+    """Assign each worker `cores` CPU ids from the Docker VM's CPUs.
 
     Containers are not cpuset-pinned (Slurm's hwloc view inside a pinned container doesn't
     match its CPU numbering, which breaks job binding). Instead Slurm reserves every other
-    CPU via CpuSpecList so jobs on worker i can only use its assigned ids. With more worker
-    cores than VM CPUs, workers overlap: fine for function tests, and one reason this
-    emulator says nothing about compute scaling.
+    CPU via CpuSpecList so jobs on worker i can only use its assigned ids.
+
+    When they fit, workers get disjoint blocks. Otherwise they overlap, and the windows
+    start at evenly spread CPUs (8 workers x 2 cores on 8 CPUs: {0,1}, {1,2}, ... {7,0})
+    rather than wrapping in blocks ({0,1} twice). Wrapping made workers i and i+4 identical,
+    so their busy-polling MPI ranks shared one core and took turns in ~3.5 ms scheduler
+    slices; with sliding windows, whole-worker ranks can each find a CPU of their own.
+    Overlap is fine for function and network tests, and one reason this emulator says
+    nothing about compute scaling.
     """
     if not 1 <= cores <= host_cpus:
         raise EmuError(f"--worker-cores must be in 1..{host_cpus} (Docker VM CPUs)")
-    return [",".join(str((cores * i + j) % host_cpus) for j in range(cores))
-            for i in range(n_workers)]
+    if n_workers * cores <= host_cpus:
+        starts = [cores * i for i in range(n_workers)]
+    else:
+        starts = [i * host_cpus // n_workers for i in range(n_workers)]
+    return [",".join(str((s + j) % host_cpus) for j in range(cores)) for s in starts]
 
 
 def up(plan: Plan, build: bool = False, worker_cores: int = 2, worker_memory_mb: int = 1024,

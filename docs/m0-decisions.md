@@ -51,7 +51,7 @@ inventory check shows the same version on every node.
 Chosen during M1 from measured memory and phase timing. The p95 latency limit is frozen
 before any scaling run and recorded in each manifest's `measurement.p95_latency_limit_ms`.
 
-### 4. Slurm/container launch approach and MPI transport — **container launch proposed; MPI open**
+### 4. Slurm/container launch approach and MPI transport — **proposed (container launch and MPI)**
 
 Must pass the PRD §6 two-node gate during M2: launch on the allocated hosts, enforce or
 verify limits on the real container processes, propagate exit codes, and clean up on
@@ -79,8 +79,19 @@ worker; `-c1 --mem=200M` limits apply inside the container on W1 and W8; a 300 M
 allocation under `--mem=100M` is OOM-killed; exit codes propagate through `srun` and
 `sbatch`; after `scancel`, tasks that ignore SIGTERM are gone within 6.7 s, leaving no job
 cgroups; and no root-owned runtime process exists while jobs run. **Not yet
-satisfied:** the gate needs two *physical* nodes. MPI launch inside the container is still
-open (the Slurm PMIx plugin currently fails to load).
+satisfied:** the gate needs two *physical* nodes.
+
+**Proposed MPI launch:** `srun --mpi=pmix … apptainer exec <staged MPI image> <app>`,
+with Open MPI 4.1.6 from Ubuntu 24.04 in both the nodes and the image, sharing Slurm's
+PMIx 5.0.1 (nodes need `libpmix-dev`). Transport is forced to TCP on the data subnet
+(`pml=ob1`, `btl=self,vader,tcp`, `btl_tcp_if_include`), and `KillOnBadExit=1` ends a
+step when any rank dies. Evidence (`daisychain emu mpi-verify`, chain and star, 8
+workers): identical packages inside and outside the image; ranks on the allocated
+workers, inside the image, in their step cgroups; inter-node bytes on every switch hop of
+the route; a dead rank ends the step in under 1 s instead of hanging (it hung >120 s
+without `KillOnBadExit`); cancellation leaves nothing behind. Caveats: srun returns 143
+rather than the failing rank's code; job containers must share the host network
+namespace (the PMIx client connects over loopback TCP).
 
 ### 5. Separate monitoring/storage host — **open; initial analysis below**
 
@@ -99,6 +110,11 @@ the planning assumption (every link 1 Gb/s) gives:
   show topology effects.
 - A sequential pipeline (`--pattern pipeline`) puts at most one flow on each link in
   both topologies.
+- Emulation check (MPI, 8 workers): both predictions hold. 4 pairs crossing S2→S3 got
+  927 Mb/s in total on the chain vs 3646 Mb/s on the star; alltoall (1 MiB per
+  destination) took 162 vs 102 ms; a 4 MiB pipeline ran at 39.3 vs 39.8 ms per
+  micro-batch. So a pipeline-parallel layout should be chain-tolerant, while
+  allreduce/alltoall-heavy layouts are not (details in emulated-cluster.md, MPI).
 
 Implications to confirm on hardware: a faster C0 uplink (or bonded NICs) changes the
 fan-out picture, but it is a hardware upgrade and must not be mixed into the chain-vs-star
@@ -117,6 +133,7 @@ measurements are still needed, including the server's disk, which the emulator h
 
 | Date | Change | Reason |
 |---|---|---|
+| 2026-11-19 | MPI in containerised Slurm steps (srun --mpi=pmix + Apptainer, Open MPI 4.1.6 over TCP); all MPI checks pass on chain and star. Emulated F6 results: cross-chain pairs get 927 vs 3646 Mb/s (star), alltoall 1.6× and allreduce 1.35× slower on the chain, pipeline and point-to-point identical. KillOnBadExit=1 added. Small-message latency is not measurable in emulation | Decision 4 (MPI), decision 5 evidence |
 | 2026-11-19 | NFSv4 storage + verified local staging on the emulated cluster. Cold start of 256 MiB to N workers: 2.5/4.7/9.2/18.4 s for N=1/2/4/8 (chain) and the same within noise on the star, so C0's NIC limits cold start, not the chain. NFS grace period (default 90 s) blocks opens after a server restart; emulator uses 15 s | Decision 5 evidence (emulation) |
 | 2026-11-19 | Proposed container launch: Docker-built images run with non-setuid Apptainer 1.5.5 under `srun`; all container gate checks pass in emulation | Decision 4 |
 | 2026-11-19 | Slurm 23.11.4 on the emulated cluster: 1/2/4/8-node allocation, cgroup v2 CPU/RAM limits, exit codes, cancellation and timeout cleanup all pass; Slurm time-limit enforcement takes ~1–2 min, so the 30 s failure bound must come from the router | Decision 4 groundwork |

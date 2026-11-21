@@ -70,11 +70,15 @@ def ensure_staged(plan: emu.Plan, rebuild: bool = False, log=print) -> str:
 
 
 def srun_cmd(nodes: list[str], args: str, tasks_per_node: int = 1, container: bool = True,
-             minutes: int = 5) -> str:
+             minutes: int = 5, cpus_per_task: int = 1) -> str:
     run = containers.launcher(NAME) if container else ""
     return (f"{env_exports()}srun --mpi=pmix -N{len(nodes)} -w {','.join(nodes)} "
-            f"--ntasks-per-node={tasks_per_node} -c1 --mem={STEP_MEM} -t {minutes} "
-            f"{run}dcbench {args}")
+            f"--ntasks-per-node={tasks_per_node} -c{cpus_per_task} --mem={STEP_MEM} "
+            f"-t {minutes} {run}dcbench {args}")
+
+
+def worker_cores() -> int:
+    return int(next(iter(emu.running_nodes().values()))["labels"]["daisychain.worker_cores"])
 
 
 def parse(stdout: str) -> list[dict]:
@@ -90,8 +94,12 @@ def parse(stdout: str) -> list[dict]:
 
 def run(plan: emu.Plan, nodes: list[str], args: str, tasks_per_node: int = 1,
         container: bool = True, timeout: int = 600) -> tuple[list[dict], subprocess.CompletedProcess]:
+    # Each rank gets its share of the worker's cores. Busy-polling ranks pinned to one
+    # core each would collide where emulated workers' CPU sets overlap.
+    cpus = max(1, worker_cores() // tasks_per_node)
     r = slurm._as_user(plan, srun_cmd(nodes, args, tasks_per_node, container,
-                                      minutes=max(2, timeout // 60 + 1)), timeout=timeout)
+                                      minutes=max(2, timeout // 60 + 1), cpus_per_task=cpus),
+                       timeout=timeout)
     return parse(r.stdout), r
 
 

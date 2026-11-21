@@ -186,13 +186,17 @@ static void cmd_bw(const long *sizes, int ns, int max_iters) {
     char *buf = calloc((size_t)(maxb ? maxb : 1) * WINDOW, 1);
     MPI_Request req[WINDOW];
     char ack = 0;
+    double t_start = 0;
     for (int s = 0; s < ns; s++) {
         long b = sizes[s];
-        int it = iters_for(b * WINDOW, max_iters) / 4 + 2, warm = 2;
-        double t0 = 0;
-        MPI_Barrier(MPI_COMM_WORLD);
-        for (int i = -warm; i < it; i++) {
-            if (i == 0) t0 = MPI_Wtime();
+        int it = iters_for(b * WINDOW, max_iters) / 4 + 2;
+        for (int i = -2; i < it; i++) {
+            if (i == 0) {
+                /* Common start: the aggregate is total bytes over the slowest pair's time,
+                   so pairs that finish early cannot inflate it. */
+                MPI_Barrier(MPI_COMM_WORLD);
+                t_start = MPI_Wtime();
+            }
             for (int w = 0; w < WINDOW; w++) {
                 char *p = buf + (size_t)w * b;
                 if (sender) MPI_Isend(p, (int)b, MPI_BYTE, peer, 2, MPI_COMM_WORLD, &req[w]);
@@ -202,15 +206,16 @@ static void cmd_bw(const long *sizes, int ns, int max_iters) {
             if (sender) MPI_Recv(&ack, 1, MPI_BYTE, peer, 3, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
             else MPI_Send(&ack, 1, MPI_BYTE, peer, 3, MPI_COMM_WORLD);
         }
-        double mine = sender ? (double)b * WINDOW * it * 8 / (MPI_Wtime() - t0) / 1e6 : 0;
+        double elapsed = MPI_Wtime() - t_start, slowest = 0;
+        double mine = sender ? (double)b * WINDOW * it * 8 / elapsed / 1e6 : 0;
         double *all = rank == 0 ? calloc(nprocs, sizeof *all) : NULL;
         MPI_Gather(&mine, 1, MPI_DOUBLE, all, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Reduce(&elapsed, &slowest, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
         if (rank == 0) {
-            double tot = 0;
             printf("{\"bench\":\"bw\",\"bytes\":%ld,\"pairs\":%d,\"window\":%d,\"iters\":%d,"
                    "\"pair_mbps\":[", b, k, WINDOW, it);
-            for (int p = 0; p < k; p++) { printf("%s%.2f", p ? "," : "", all[p]); tot += all[p]; }
-            printf("],\"total_mbps\":%.2f}\n", tot);
+            for (int p = 0; p < k; p++) printf("%s%.2f", p ? "," : "", all[p]);
+            printf("],\"total_mbps\":%.2f}\n", (double)b * WINDOW * it * k * 8 / slowest / 1e6);
             fflush(stdout);
             free(all);
         }

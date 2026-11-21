@@ -328,7 +328,53 @@ trust the step's exit code.
 
 ### Microbenchmarks (`emu mpi-bench`, PRD F6)
 
-<!-- MPI-BENCH-RESULTS -->
+Groups: `p2p` (ping-pong and streaming bandwidth between worker pairs 0–3 inter-switch
+links apart), `cross` (k pairs streaming at once, rank i → i+k), `coll` (allreduce,
+alltoall, bcast on 2/4/8 ranks), `layer` (synthetic pipeline: each stage receives a
+micro-batch's activations, optionally computes, forwards). Each row is the median of 3
+repeats and carries a topology-derived bound where one is well defined. Results:
+`results/emu/mpi-bench-{chain,star}.json`.
+
+Dev machine, 8 workers, 1 Gb/s links, evidence tier "designed":
+
+| Workload (8 ranks unless noted) | Chain | Star | Bound chain / star |
+|---|---|---|---|
+| Point-to-point bandwidth, 4 MiB, any distance (0–3 inter-switch links) | 949–957 Mb/s | 957 Mb/s | 1000 / 1000 |
+| 4 pairs W1→W5 … W4→W8 at once, 4 MiB | **927 Mb/s** | **3646 Mb/s** | 1000 / 4000 |
+| 2 pairs on 4 ranks, 4 MiB | 955 Mb/s | 1913 Mb/s | 1000 / 2000 |
+| Alltoall, 1 MiB per destination | **162 ms** | **102 ms** | ≥134 / ≥59 ms |
+| Allreduce, 4 MiB | 147 ms | 110 ms | — |
+| Bcast, 4 MiB | 249 ms | 255 ms | — |
+| Pipeline, 4 MiB activations, no compute | 39.3 ms/batch | 39.8 ms/batch | ≥33.6 / ≥33.6 |
+
+- **The chain costs nothing when traffic flows along it.** Point-to-point bandwidth is the
+  same at every distance, and a stage-to-stage pipeline puts one flow on each link, so
+  pipelined (layer-split) inference is predicted to be insensitive to chain vs star.
+- **The chain costs a lot when traffic crosses its middle.** Four simultaneous pairs that
+  must cross S2→S3 share 1 Gb/s (3.9× less than the star); alltoall is 1.6× slower and
+  allreduce 1.35× slower. Tensor-parallel or expert-parallel layouts, which lean on
+  allreduce/alltoall, are where the chain will hurt.
+- **Bcast is unaffected** because Open MPI's broadcast tree is limited by the root's NIC
+  in both topologies.
+- **Efficiency vs bound:** chain alltoall reaches 83% of its link bound, star only 58%:
+  in the star, seven senders converge on each receiving NIC, and TCP incast through one
+  drop-tail queue loses throughput. Real switch buffers will differ.
+- Rows marked `burst_affected` (all ping-pong latencies below 4 MiB, collectives on small
+  messages) reflect the shaper and VM timers, not a network. Example: an 8-rank 4 KiB
+  allreduce read 5.6 ms on one run and 0.05 ms on another. Measure these on hardware.
+
+### Pitfalls found (and how the code handles them)
+
+1. **Overlapping worker CPUs made ranks share a core.** With 8 workers × 2 cores on
+   8 VM CPUs, CPU sets wrapped, so workers i and i+4 got identical sets and Slurm put
+   their 1-CPU ranks on the same core. Busy-polling ranks then took turns: W1↔W5
+   ping-pong read 3500 µs while W1↔W7 read 2.7 µs. Workers now get sliding windows
+   ({0,1}, {1,2}, … {7,0}), and MPI ranks get the whole worker (`-c` = worker cores) so
+   the kernel can spread them.
+2. **Summing per-pair rates overstates shared-link bandwidth.** When pairs share a link
+   unevenly, the early finisher's rate and the late finisher's solo time both count; the
+   first chain run reported 1172 Mb/s through a 1 Gb/s link. `dcbench bw` now divides
+   total bytes by the slowest pair's time from a common barrier.
 
 ## Known limitations
 

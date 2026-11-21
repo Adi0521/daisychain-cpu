@@ -31,7 +31,9 @@ def test_parse_slurmd_c():
 
 def test_worker_cpusets_round_robin():
     assert emu.worker_cpusets(4, 2, 8) == ["0,1", "2,3", "4,5", "6,7"]
-    assert emu.worker_cpusets(8, 2, 8)[4:] == ["0,1", "2,3", "4,5", "6,7"]  # overlap wraps
+    # Overlapping: sliding windows, so no two workers have identical CPU sets.
+    assert emu.worker_cpusets(8, 2, 8) == ["0,1", "1,2", "2,3", "3,4", "4,5", "5,6", "6,7", "7,0"]
+    assert emu.worker_cpusets(6, 2, 8) == ["0,1", "1,2", "2,3", "4,5", "5,6", "6,7"]
     with pytest.raises(emu.EmuError):
         emu.worker_cpusets(2, 9, 8)
 
@@ -42,7 +44,7 @@ def test_conf_declares_detected_hw_and_reserves_other_cpus(plan):
     assert list(nodes) == [f"W{i}" for i in range(1, 9)]
     assert "CPUs=8 Boards=1 SocketsPerBoard=1 CoresPerSocket=8 ThreadsPerCore=1" in nodes["W1"]
     assert "CpuSpecList=2,3,4,5,6,7" in nodes["W1"]
-    assert "CpuSpecList=0,1,2,3,4,5" in nodes["W4"]
+    assert "CpuSpecList=0,1,2,5,6,7" in nodes["W4"]  # W4 owns 3,4 (sliding windows)
     assert "NodeAddr=10.10.0.18" in nodes["W8"]
     assert f"RealMemory={1024 - slurm.SLURMD_RESERVED_MB}" in nodes["W1"]
 
