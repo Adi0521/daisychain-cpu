@@ -20,6 +20,7 @@ RUN apt-get update \
       munge slurm-wlm slurm-client \
       nfs-kernel-server nfs-common \
       openmpi-bin libpmix-dev \
+      prometheus-node-exporter socat \
  && rm -rf /var/lib/apt/lists/*
 
 # Apptainer from the project's official PPA, non-setuid build: job containers run as the
@@ -42,14 +43,19 @@ RUN groupadd -g 2000 dcuser && useradd -m -u 2000 -g 2000 -s /bin/bash dcuser
 RUN mkdir -p /etc/slurm /var/spool/slurmctld /var/spool/slurmd /var/log/slurm \
  && chown slurm:slurm /var/spool/slurmctld /var/log/slurm
 
-# Worker-local artifact stores, written by staging jobs running as dcuser (F7).
-RUN mkdir -p /var/lib/daisychain/stage /var/lib/daisychain/images /shared \
- && chown dcuser:dcuser /var/lib/daisychain/stage /var/lib/daisychain/images
+# Worker-local artifact stores, written by staging jobs running as dcuser (F7), and the
+# node_exporter textfile directory those jobs report model-load times into (F8).
+RUN mkdir -p /var/lib/daisychain/stage /var/lib/daisychain/images /var/lib/daisychain/metrics \
+      /shared \
+ && chown dcuser:dcuser /var/lib/daisychain/stage /var/lib/daisychain/images \
+      /var/lib/daisychain/metrics
 
 COPY emu/node-init.sh /usr/local/sbin/node-init.sh
 COPY emu/slurm-epilog.sh /etc/slurm/epilog.sh
 COPY src/daisychain/stage.py /usr/local/bin/daisychain-stage
+COPY emu/slurm-exporter.py /usr/local/bin/daisychain-slurm-exporter
 COPY --from=dcbench /usr/local/bin/dcbench /usr/local/bin/dcbench
-RUN chmod 0755 /usr/local/sbin/node-init.sh /etc/slurm/epilog.sh /usr/local/bin/daisychain-stage
+RUN chmod 0755 /usr/local/sbin/node-init.sh /etc/slurm/epilog.sh /usr/local/bin/daisychain-stage \
+      /usr/local/bin/daisychain-slurm-exporter
 
 CMD ["sleep", "infinity"]

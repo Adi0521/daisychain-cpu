@@ -29,6 +29,7 @@ PREFIX = "dc-"
 SHARED_VOLUME = "dc-shared"  # C0's NFS export; an ext4-backed volume (overlayfs can't be exported)
 DATA_SUBNET = ipaddress.ip_network("10.10.0.0/24")
 FIRST_HOST_OFFSET = 10
+FIRST_SWITCH_OFFSET = 2  # switch management addresses: .2 … .9
 TBF_QUEUE_LATENCY_MS = 50
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -58,6 +59,9 @@ class Plan:
     gbps: float
     latency_us: float | None
     labels: dict[str, str] = field(default_factory=dict)
+    # In-band management address on each switch's bridge, as a managed switch would have;
+    # its node_exporter serves port counters there (monitoring.py).
+    switch_addresses: dict[str, str] = field(default_factory=dict)
 
     @property
     def nodes(self) -> list[str]:
@@ -87,8 +91,14 @@ def make_plan(topo: Topology, n_workers: int | None = None, gbps: float | None =
     cables = [Cable(h, "eth0", topo.hosts[h].switch, f"p-{h}") for h in hosts]
     cables += [Cable(a, f"p-{b}", b, f"p-{a}") for a, b in topo.switch_links]
 
+    if len(switches) > FIRST_HOST_OFFSET - FIRST_SWITCH_OFFSET:
+        raise EmuError(f"at most {FIRST_HOST_OFFSET - FIRST_SWITCH_OFFSET} switches supported")
+    switch_addresses = {sw: str(ipaddress.ip_address(
+        int(DATA_SUBNET.network_address) + FIRST_SWITCH_OFFSET + i)) for i, sw in enumerate(switches)}
+
     plan = Plan(
         topo=topo, hosts=hosts, switches=switches, addresses=addresses, cables=cables,
+        switch_addresses=switch_addresses,
         gbps=gbps if gbps is not None else topo.link_gbps,
         latency_us=latency_us if latency_us is not None else topo.link_latency_us,
     )
@@ -141,6 +151,7 @@ def wiring_script(plan: Plan, pids: dict[str, int]) -> str:
         ]
     for sw in plan.switches:
         lines += [f"ip -n {sw} link add br0 type bridge stp_state 0",
+                  f"ip -n {sw} addr add {plan.switch_addresses[sw]}/{prefix_len} dev br0",
                   f"ip -n {sw} link set br0 up"]
     for c in plan.cables:
         for node, dev in ((c.a, c.a_if), (c.b, c.b_if)):
@@ -224,7 +235,8 @@ def worker_cpusets(n_workers: int, cores: int, host_cpus: int) -> list[str]:
 
 
 def up(plan: Plan, build: bool = False, worker_cores: int = 2, worker_memory_mb: int = 1024,
-       slurm: bool = True, keep_on_failure: bool = False, log=print) -> None:
+       slurm: bool = True, keep_on_failure: bool = False, monitoring: bool = True,
+       ui_ports: dict[str, int] | None = None, log=print) -> None:
     existing = running_nodes()
     if existing:
         raise EmuError(f"emulated cluster already exists ({len(existing)} containers); "
@@ -279,6 +291,9 @@ def up(plan: Plan, build: bool = False, worker_cores: int = 2, worker_memory_mb:
         if slurm:
             from . import slurm as slurm_mod
             slurm_mod.start(plan, worker_cores, worker_memory_mb, log=log)
+        if monitoring:
+            from . import monitoring as monitoring_mod
+            monitoring_mod.start(plan, ui_ports, log=log)
     except Exception:
         if keep_on_failure:
             log("bring-up failed; containers kept for debugging (`daisychain emu down` to remove)")
@@ -292,6 +307,10 @@ def down(log=print) -> int:
     """Remove the cluster. NFS clients are unmounted first and workers removed before C0:
     removing the server while a client still has the mount can leave the client container
     unkillable (its exiting tasks wait on NFS forever)."""
+    # Monitoring containers share C0's network namespace; remove them first.
+    aux = _docker("ps", "-a", "--filter", "label=daisychain.aux", "--format", "{{.Names}}").stdout.split()
+    if aux:
+        _docker("rm", "-f", *aux)
     nodes = running_nodes()
     workers = [n for n, v in nodes.items() if v["labels"].get("daisychain.role") == "worker"]
     for w in workers:

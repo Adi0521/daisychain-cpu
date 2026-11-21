@@ -127,3 +127,32 @@ def test_predicted_makespan_matches_c0_nic_bound():
         assert storage.predicted_makespan(plan, ["W1"], size) == pytest.approx(2.147, abs=1e-3)
         nodes = [f"W{i}" for i in range(1, 9)]
         assert storage.predicted_makespan(plan, nodes, size) == pytest.approx(17.18, abs=0.01)
+
+
+def test_metrics_written_for_textfile_collector(dirs, capsys, tmp_path):
+    shared, local = dirs
+    metrics = tmp_path / "metrics"
+    metrics.mkdir()
+    publish(shared, "models", "m", {"a.bin": b"x" * 100})
+    code, out = run(capsys, "models/m", "--root", str(shared), "--dest", str(local),
+                    "--metrics-dir", str(metrics))
+    assert code == 0
+    text = (metrics / "stage-models_m.prom").read_text()
+    assert 'daisychain_stage_bytes{artifact="models/m"} 100' in text
+    assert 'daisychain_stage_success{artifact="models/m"} 1' in text
+    assert [p.name for p in metrics.iterdir()] == ["stage-models_m.prom"]
+
+
+def test_metrics_record_failure_and_missing_dir_is_ignored(dirs, capsys, tmp_path):
+    shared, local = dirs
+    metrics = tmp_path / "metrics"
+    metrics.mkdir()
+    publish(shared, "models", "m", {"a.bin": b"good"})
+    (shared / "models/m/a.bin").write_bytes(b"evil")
+    code, _ = run(capsys, "models/m", "--root", str(shared), "--dest", str(local),
+                  "--metrics-dir", str(metrics))
+    assert code == 3
+    assert 'daisychain_stage_success{artifact="models/m"} 0' in (metrics / "stage-models_m.prom").read_text()
+    code, _ = run(capsys, "models/m", "--root", str(shared), "--dest", str(local),
+                  "--metrics-dir", str(tmp_path / "absent"))
+    assert code == 3

@@ -78,14 +78,25 @@ components:
     notes: Pin the exact release; platform file syntax changes between major versions.
 
   prometheus:
-    candidate: Prometheus + node_exporter
+    candidate: >
+      Prometheus v3.1.0 (prom/prometheus image, on C0, 5 s scrape); node_exporter
+      1.7.0 (Ubuntu 24.04 prometheus-node-exporter) on every host and switch
     pinned: null
-    status: open
+    status: candidate
+    notes: >
+      Config is generated from the topology (`daisychain monitoring render`, committed under
+      config/monitoring). Switch ports use the qdisc collector in emulation; on hardware,
+      use the switches' SNMP counters if they are managed, else mark per-link utilisation
+      as inferred (PRD §9). Emulated cluster (2026-11-20): all monitoring checks pass;
+      a frozen worker shows up=0 within ~8 s.
 
   grafana:
-    candidate: Grafana OSS
+    candidate: Grafana OSS 11.4.0 (grafana/grafana-oss image, on C0), provisioned dashboard
     pinned: null
-    status: open
+    status: candidate
+    notes: >
+      Anonymous read-only access, update checks and plugin installs disabled (no internet
+      on the cluster). Reached through a management interface, not the data fabric.
 
   python:
     candidate: Distribution python3 on hosts; image Python pinned in Dockerfile

@@ -22,6 +22,9 @@ The artifact ID is the SHA-256 of the manifest itself. Staging:
 
 Prints one JSON line describing the outcome. Exit codes: 0 ok, 3 checksum mismatch,
 4 I/O error or timeout.
+
+If --metrics-dir exists, the outcome is also written there for node_exporter's textfile
+collector (PRD F8 model-load time), one file per artifact, replaced atomically.
 """
 
 import argparse
@@ -37,6 +40,7 @@ import sys
 import time
 
 MARKER = ".daisychain-artifact"
+METRICS_DIR = "/var/lib/daisychain/metrics"
 CHUNK = 4 << 20
 
 
@@ -142,6 +146,42 @@ def stage(artifact, root, dest, untar):
             "files": len(entries)}
 
 
+def write_metrics(out, metrics_dir):
+    """Best effort: metrics must never turn a good staging run into a failure."""
+    if not metrics_dir or not os.path.isdir(metrics_dir):
+        return
+    art = out["artifact"].replace("\\", "/").replace('"', "")
+    lab = 'artifact="%s"' % art
+    lines = [
+        "# HELP daisychain_stage_seconds Wall time of the last staging run",
+        "# TYPE daisychain_stage_seconds gauge",
+        "daisychain_stage_seconds{%s} %s" % (lab, out["seconds"]),
+        "# HELP daisychain_stage_bytes Bytes copied by the last staging run (0 on cache hit)",
+        "# TYPE daisychain_stage_bytes gauge",
+        "daisychain_stage_bytes{%s} %d" % (lab, out.get("bytes") or 0),
+        "# HELP daisychain_stage_success 1 if the last staging run succeeded",
+        "# TYPE daisychain_stage_success gauge",
+        "daisychain_stage_success{%s} %d" % (lab, out["status"] == "ok"),
+        "# HELP daisychain_stage_cache_hit 1 if the last run reused a verified local copy",
+        "# TYPE daisychain_stage_cache_hit gauge",
+        "daisychain_stage_cache_hit{%s} %d" % (lab, bool(out.get("cache_hit"))),
+        "# HELP daisychain_stage_timestamp_seconds When the last staging run finished",
+        "# TYPE daisychain_stage_timestamp_seconds gauge",
+        "daisychain_stage_timestamp_seconds{%s} %.3f" % (lab, time.time()),
+    ]
+    name = "stage-%s.prom" % art.replace("/", "_")
+    tmp = os.path.join(metrics_dir, ".%s.%d" % (name, os.getpid()))
+    try:
+        with open(tmp, "w") as f:
+            f.write("\n".join(lines) + "\n")
+        os.rename(tmp, os.path.join(metrics_dir, name))
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("artifact", help="<kind>/<name>, e.g. models/synthetic-256m")
@@ -150,6 +190,8 @@ def main(argv=None):
                    help="default: /var/lib/daisychain/images for images/*, else …/stage")
     p.add_argument("--untar", action="store_true", help="unpack image.tar after verifying")
     p.add_argument("--timeout", type=int, default=600, help="overall bound in seconds")
+    p.add_argument("--metrics-dir", default=METRICS_DIR,
+                   help="node_exporter textfile directory ('' to disable)")
     args = p.parse_args(argv)
 
     dest = args.dest or ("/var/lib/daisychain/images" if args.artifact.startswith("images/")
@@ -178,6 +220,7 @@ def main(argv=None):
     out["seconds"] = round(elapsed, 3)
     if out.get("bytes") and elapsed > 0:
         out["mbps"] = round(out["bytes"] * 8 / 1e6 / elapsed, 1)
+    write_metrics(out, args.metrics_dir)
     print(json.dumps(out), flush=True)
     return code
 

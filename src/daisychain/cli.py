@@ -140,10 +140,23 @@ def cmd_emu_up(args) -> int:
     plan = emu.make_plan(topo, args.workers, args.gbps, args.latency_us, args.topology)
     emu.up(plan, build=args.build, worker_cores=args.worker_cores,
            worker_memory_mb=args.worker_memory_mb, slurm=not args.no_slurm,
-           keep_on_failure=args.keep_on_failure)
+           keep_on_failure=args.keep_on_failure, monitoring=not args.no_monitoring,
+           ui_ports={"grafana": args.grafana_port, "prometheus": args.prometheus_port})
     print(_table(["node", "address", "switch"],
                  [[h, plan.addresses[h], topo.hosts[h].switch] for h in plan.hosts]))
     print(f"\nshell: docker exec -it {emu.container(plan.hosts[0])} bash")
+    return 0
+
+
+def cmd_monitoring_render(args) -> int:
+    from . import monitoring
+
+    plan = emu.make_plan(Topology.load(args.topology), topology_path=args.topology)
+    out = Path(args.out)
+    for rel, content in monitoring.render(plan).items():
+        (out / rel).parent.mkdir(parents=True, exist_ok=True)
+        (out / rel).write_text(content)
+        print(f"wrote {out / rel}")
     return 0
 
 
@@ -377,6 +390,61 @@ def cmd_emu_mpi_bench(args) -> int:
     return 0
 
 
+def cmd_emu_monitor_verify(args) -> int:
+    from dataclasses import asdict
+
+    from . import monitoring
+
+    plan = emu.plan_from_running()
+    print(f"Monitoring checks on {plan.topo.name}, {len(plan.hosts) - 1} worker(s) — emulation")
+    checks = monitoring.verify(plan)
+    ok = all(c.ok for c in checks)
+    if args.output:
+        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.output).write_text(json.dumps(
+            {"topology": plan.topo.name, "workers": len(plan.hosts) - 1, "ok": ok,
+             "scrape_interval_s": monitoring.SCRAPE_S,
+             "checks": [asdict(c) for c in checks]}, indent=2) + "\n")
+        print(f"wrote {args.output}")
+    print("PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+def cmd_emu_monitor_overhead(args) -> int:
+    from . import monitoring
+
+    plan = emu.plan_from_running()
+    run_id = f"{dt.datetime.now(dt.timezone.utc):%Y%m%dT%H%M%SZ}-monitoring-overhead-{secrets.token_hex(3)}"
+    print(f"{run_id}: scraping on vs off (Prometheus paused) on {plan.topo.name} — emulation")
+    rep = monitoring.overhead(plan, idle_s=args.idle_seconds, repeats=args.repeats)
+    if args.output:
+        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.output).write_text(json.dumps(
+            {"run_id": run_id, "experiment": "monitoring-overhead", "evidence_tier": "designed",
+             "topology": plan.topo.name, "scrape_interval_s": monitoring.SCRAPE_S, **rep},
+            indent=2) + "\n")
+        print(f"wrote {args.output}")
+    return 0
+
+
+def cmd_emu_monitor_export(args) -> int:
+    from . import monitoring
+
+    plan = emu.plan_from_running()
+    end = time.time()
+    start = end - args.minutes * 60
+    run_id = args.run_id or f"{dt.datetime.now(dt.timezone.utc):%Y%m%dT%H%M%SZ}-metrics-export-{secrets.token_hex(3)}"
+    series = monitoring.export(start, end)
+    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.output).write_text(json.dumps(
+        {"run_id": run_id, "topology": plan.topo.name, "evidence_tier": "designed",
+         "start": start, "end": end, "step_s": monitoring.SCRAPE_S,
+         "queries": monitoring.EXPORT_SERIES, "series": series}, indent=1) + "\n")
+    n = sum(len(v) for v in series.values())
+    print(f"wrote {args.output}: {len(series)} metrics, {n} series, {args.minutes} min")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="daisychain", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -406,6 +474,13 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--payload-mb", type=float, help="per-flow payload for a transfer-time bound")
     c.set_defaults(func=cmd_topology_load)
 
+    mon = sub.add_parser("monitoring", help="monitoring configuration").add_subparsers(
+        dest="sub", required=True)
+    c = mon.add_parser("render", help="write Prometheus and Grafana config for a topology")
+    c.add_argument("--topology", default="config/topology/chain.yaml")
+    c.add_argument("--out", default="config/monitoring")
+    c.set_defaults(func=cmd_monitoring_render)
+
     em = sub.add_parser("emu", help="emulated cluster in Docker").add_subparsers(
         dest="sub", required=True)
     c = em.add_parser("up", help="start containers and wire the topology")
@@ -416,6 +491,10 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--worker-cores", type=int, default=2, help="CPUs pinned per worker")
     c.add_argument("--worker-memory-mb", type=int, default=1024, help="memory cap per worker")
     c.add_argument("--no-slurm", action="store_true", help="network fabric only")
+    c.add_argument("--no-monitoring", action="store_true",
+                   help="skip exporters, Prometheus and Grafana")
+    c.add_argument("--grafana-port", type=int, default=3000, help="on 127.0.0.1 of this machine")
+    c.add_argument("--prometheus-port", type=int, default=9090, help="on 127.0.0.1 of this machine")
     c.add_argument("--keep-on-failure", action="store_true", help="leave containers for debugging")
     c.add_argument("--build", action="store_true", help="rebuild the node image")
     c.set_defaults(func=cmd_emu_up)
@@ -474,6 +553,22 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--compute-us", type=float, default=0, help="per-stage busy time (layer)")
     c.add_argument("--output", help="write JSON report here")
     c.set_defaults(func=cmd_emu_mpi_bench)
+
+    c = em.add_parser("monitor-verify",
+                      help="exporters, switch counters, Slurm/staging metrics, 30 s detection")
+    c.add_argument("--output", help="write JSON report here")
+    c.set_defaults(func=cmd_emu_monitor_verify)
+
+    c = em.add_parser("monitor-overhead", help="fabric/CPU cost of monitoring and workload impact")
+    c.add_argument("--idle-seconds", type=int, default=30)
+    c.add_argument("--repeats", type=int, default=3)
+    c.add_argument("--output", help="write JSON report here")
+    c.set_defaults(func=cmd_emu_monitor_overhead)
+    c = em.add_parser("monitor-export", help="export recent metrics as JSON (time series)")
+    c.add_argument("--minutes", type=float, default=15)
+    c.add_argument("--run-id", help="link the export to an experiment run")
+    c.add_argument("--output", required=True)
+    c.set_defaults(func=cmd_emu_monitor_export)
 
     c = sub.add_parser("validate", help="validate JSON/JSONL files against a schema")
     c.add_argument("schema", choices=schemas.SCHEMA_NAMES)
