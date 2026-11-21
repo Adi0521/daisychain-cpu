@@ -445,6 +445,44 @@ def cmd_emu_monitor_export(args) -> int:
     return 0
 
 
+def cmd_emu_fail(args) -> int:
+    from dataclasses import asdict
+
+    from . import failures
+
+    plan = emu.plan_from_running()
+    ws = plan.hosts[1:]
+    victim = args.victim or ws[len(ws) // 2]
+    run_id = f"{dt.datetime.now(dt.timezone.utc):%Y%m%dT%H%M%SZ}-failure-{args.scenario}-{secrets.token_hex(3)}"
+    print(f"{run_id} on {plan.topo.name} — emulation, evidence tier 'designed'")
+    if args.scenario in ("worker-kill", "worker-freeze"):
+        res = failures.worker_loss(plan, victim, mode=args.scenario.split("-")[1],
+                                   freeze_s=args.seconds)
+    elif args.scenario == "link-down":
+        if not plan.topo.switch_links:
+            raise emu.EmuError("link-down needs a topology with inter-switch links")
+        a, b = args.link.split("-") if args.link else plan.topo.switch_links[len(plan.topo.switch_links) // 2]
+        res = failures.link_down(plan, a, b, args.seconds)
+    else:
+        res = failures.nfs_down(plan, args.seconds)
+    ok = all(v[0] for v in res.checks.values())
+    print()
+    for name, (good, detail) in res.checks.items():
+        print(f"{'OK  ' if good else 'FAIL'}  {name:26s} {detail}")
+    print("metrics: " + ", ".join(f"{k}={v}" for k, v in res.metrics.items()))
+    if args.output:
+        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.output).write_text(json.dumps(
+            {"run_id": run_id, "experiment": "failure", "evidence_tier": "designed",
+             "topology": plan.topo.name, "ok": ok,
+             **{k: v for k, v in asdict(res).items() if k != "checks"},
+             "checks": {k: {"ok": g, "detail": d} for k, (g, d) in res.checks.items()}},
+            indent=2) + "\n")
+        print(f"wrote {args.output}")
+    print("PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="daisychain", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -569,6 +607,15 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--run-id", help="link the export to an experiment run")
     c.add_argument("--output", required=True)
     c.set_defaults(func=cmd_emu_monitor_export)
+
+    c = em.add_parser("fail", help="failure experiment: inject a fault under load, time "
+                                   "detection, cleanup and recovery")
+    c.add_argument("scenario", choices=["worker-kill", "worker-freeze", "link-down", "nfs-down"])
+    c.add_argument("--victim", help="worker to kill/freeze (default: middle worker)")
+    c.add_argument("--link", help="switch link to cut, e.g. S2-S3 (default: middle link)")
+    c.add_argument("--seconds", type=float, default=60, help="fault duration (freeze/link/nfs)")
+    c.add_argument("--output", help="write JSON record here")
+    c.set_defaults(func=cmd_emu_fail)
 
     c = sub.add_parser("validate", help="validate JSON/JSONL files against a schema")
     c.add_argument("schema", choices=schemas.SCHEMA_NAMES)

@@ -321,8 +321,8 @@ done
 """
 
 
-def start_exporters(plan: emu.Plan) -> None:
-    for node in plan.nodes:
+def start_exporters(plan: emu.Plan, nodes: list[str] | None = None) -> None:
+    for node in nodes or plan.nodes:
         emu.exec_(node, "pkill", "-f", "prometheus-node-exporter|daisychain-slurm-exporter|emu-cgroup",
                   check=False)
         emu._docker("exec", "-d", emu.container(node), *exporter_command(plan, node))
@@ -330,8 +330,9 @@ def start_exporters(plan: emu.Plan) -> None:
             emu._docker("exec", "-d", emu.container(node), "bash", "-c",
                         "exec -a emu-cgroup bash -c " + shlex.quote(CGROUP_LOOP))
     c0 = plan.hosts[0]
-    emu._docker("exec", "-d", emu.container(c0), "daisychain-slurm-exporter", "--listen",
-                f"{plan.addresses[c0]}:{SLURM_PORT}")
+    if nodes is None or c0 in nodes:
+        emu._docker("exec", "-d", emu.container(c0), "daisychain-slurm-exporter", "--listen",
+                    f"{plan.addresses[c0]}:{SLURM_PORT}")
 
 
 # ---- Prometheus, Grafana, management relay -------------------------------------------------

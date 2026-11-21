@@ -39,6 +39,8 @@ def test_slurm_conf_ends_steps_on_rank_failure(chain):
     hw = {"CPUs": 8, "Boards": 1, "SocketsPerBoard": 1, "CoresPerSocket": 8, "ThreadsPerCore": 1}
     conf = slurm.render_slurm_conf(chain, 2, 1024, hw)
     assert "KillOnBadExit=1" in conf.splitlines()
+    # Above slurmstepd's 60 s reverse-tree wait, or node failures drain healthy nodes.
+    assert "UnkillableStepTimeout=120" in conf.splitlines()
 
 
 def test_images_share_mpi_build():

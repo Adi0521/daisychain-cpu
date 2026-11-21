@@ -75,6 +75,12 @@ def render_slurm_conf(plan: emu.Plan, cores: int, memory_mb: int, hw: dict[str, 
         # A task that exits non-zero ends its whole step. Without this, MPI ranks whose
         # peer died wait forever (PRD F10); measured: >120 s hang vs 0.3 s teardown.
         "KillOnBadExit=1",
+        # When a node dies mid-job, the first node's slurmstepd waits up to 60 s (compiled-in
+        # REVERSE_TREE_CHILDREN_TIMEOUT) for the dead node's step-complete message. With the
+        # default UnkillableStepTimeout (also 60 s) that wait loses the race and Slurm drains
+        # the *healthy* batch host ("Kill task failed"). Measured: drained every time at 60;
+        # never at 120.
+        "UnkillableStepTimeout=120",
         "ReturnToService=2",
         f"KillWait={KILL_WAIT_S}",
         "Epilog=/etc/slurm/epilog.sh",

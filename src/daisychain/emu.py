@@ -134,13 +134,20 @@ def shaping_commands(ns: str, dev: str, gbps: float, latency_us: float | None) -
     return cmds
 
 
-def wiring_script(plan: Plan, pids: dict[str, int]) -> str:
-    """Bash run in a privileged helper with --pid=host --net=host (the Docker VM's view)."""
+def wiring_script(plan: Plan, pids: dict[str, int], only_host: str | None = None) -> str:
+    """Bash run in a privileged helper with --pid=host --net=host (the Docker VM's view).
+
+    With `only_host`, re-cable just that host to its switch (after the host's container
+    was restarted: a veth pair dies with either end's network namespace, so the switch
+    port disappeared too). Bridges and other cables are left alone.
+    """
     prefix_len = DATA_SUBNET.prefixlen
+    cables = [c for c in plan.cables if only_host in (None, c.a)]
+    nodes = plan.nodes if only_host is None else sorted({only_host} | {c.b for c in cables})
     lines = ["set -euo pipefail", "mkdir -p /var/run/netns"]
-    for node in plan.nodes:
+    for node in nodes:
         lines.append(f"ln -sfn /proc/{pids[node]}/ns/net /var/run/netns/{node}")
-    for i, c in enumerate(plan.cables):
+    for i, c in enumerate(cables):
         ta, tb = f"dcv{i}a", f"dcv{i}b"
         lines += [
             f"ip link add {ta} type veth peer name {tb}",
@@ -149,11 +156,12 @@ def wiring_script(plan: Plan, pids: dict[str, int]) -> str:
             f"ip link set {tb} netns {c.b}",
             f"ip -n {c.b} link set {tb} name {c.b_if}",
         ]
-    for sw in plan.switches:
-        lines += [f"ip -n {sw} link add br0 type bridge stp_state 0",
-                  f"ip -n {sw} addr add {plan.switch_addresses[sw]}/{prefix_len} dev br0",
-                  f"ip -n {sw} link set br0 up"]
-    for c in plan.cables:
+    if only_host is None:
+        for sw in plan.switches:
+            lines += [f"ip -n {sw} link add br0 type bridge stp_state 0",
+                      f"ip -n {sw} addr add {plan.switch_addresses[sw]}/{prefix_len} dev br0",
+                      f"ip -n {sw} link set br0 up"]
+    for c in cables:
         for node, dev in ((c.a, c.a_if), (c.b, c.b_if)):
             if node in plan.switches:
                 lines.append(f"ip -n {node} link set {dev} master br0")
@@ -161,8 +169,11 @@ def wiring_script(plan: Plan, pids: dict[str, int]) -> str:
                 lines.append(f"ip -n {node} addr add {plan.addresses[node]}/{prefix_len} dev {dev}")
             lines.append(f"ip -n {node} link set {dev} up")
             lines += shaping_commands(node, dev, plan.gbps, plan.latency_us)
-    for node in plan.nodes:
-        lines.append(f"ip -n {node} link set lo up")
+    for node in nodes:
+        if node not in plan.switches or only_host is None:
+            lines.append(f"ip -n {node} link set lo up")
+    if only_host is not None:
+        lines += [f"rm -f /var/run/netns/{n}" for n in nodes]
     lines.append("echo wired")
     return "\n".join(lines) + "\n"
 
@@ -328,6 +339,22 @@ def down(log=print) -> int:
     _docker("volume", "rm", "-f", SHARED_VOLUME, check=False)
     log(f"removed {len(nodes)} containers")
     return len(nodes)
+
+
+def restore_host(plan: Plan, host: str, log=print) -> None:
+    """Power a stopped worker back on: start it, re-cable it, restart its services.
+
+    Its filesystem survives (munge key, slurm.conf, staged artifacts); its network, NFS
+    mount and daemons do not.
+    """
+    _docker("start", container(host))
+    pids = {n: int(_docker("inspect", "-f", "{{.State.Pid}}", container(n)).stdout.strip())
+            for n in {host, plan.topo.hosts[host].switch}}
+    _docker("run", "--rm", "-i", "--privileged", "--pid=host", "--net=host", IMAGE,
+            "bash", "-s", input=wiring_script(plan, pids, only_host=host))
+    role = plan.topo.hosts[host].role
+    exec_(host, "/usr/local/sbin/node-init.sh", role)
+    log(f"restored {host}: re-cabled to {plan.topo.hosts[host].switch}, services restarted")
 
 
 def plan_from_running() -> Plan:
